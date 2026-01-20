@@ -415,15 +415,40 @@ async def main_async():
     _db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Check if rebuild needed
-    needs_build = not _db_path.exists() or args.rebuild or _db_path.stat().st_size == 0
+    needs_build = not _db_path.exists() or args.rebuild or (_db_path.exists() and _db_path.stat().st_size == 0)
 
     if needs_build:
-        if _db_path.exists():
-            _db_path.unlink()
+        # Use versioned database files with symlink
+        import time
+        timestamp = int(time.time())
+        versioned_db = _db_path.parent / f"{_db_path.stem}-{timestamp}.db"
 
-        # Start background build
-        asyncio.create_task(build_db_async(_db_path, args.include_history, [Path(p) for p in args.root]))
+        # Build new database with versioned name
+        asyncio.create_task(build_db_async(versioned_db, args.include_history, [Path(p) for p in args.root]))
+
+        # Wait for build to complete, then update symlink
+        async def update_symlink_after_build():
+            await _db_ready.wait()
+            if not _db_build_error:
+                try:
+                    # Remove old symlink if exists
+                    if _db_path.exists() or _db_path.is_symlink():
+                        _db_path.unlink()
+                    # Create new symlink pointing to versioned db
+                    _db_path.symlink_to(versioned_db.name)
+                    print(f"Updated symlink: {_db_path} -> {versioned_db.name}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Warning: Could not create symlink: {e}", file=sys.stderr)
+                    print(f"Using versioned database directly: {versioned_db}", file=sys.stderr)
+                    # Update global path to point to versioned db
+                    globals()['_db_path'] = versioned_db
+
+        asyncio.create_task(update_symlink_after_build())
     else:
+        # Resolve symlink if it exists
+        if _db_path.is_symlink():
+            _db_path = _db_path.resolve()
+
         _db_ready.set()
         # Build indexes in background
         asyncio.create_task(build_bm25_index_async())
