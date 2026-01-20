@@ -982,8 +982,12 @@ async def main_async():
             Tool(
                 name="semantic.search",
                 description=(
-                    "[Legacy] BM25 语义搜索 - 在对话历史中搜索相关内容。\n"
-                    "推荐使用 memory.query 代替。"
+                    "[Advanced] BM25 语义搜索 - 直接访问底层搜索引擎。\n\n"
+                    "适用场景：\n"
+                    "- 需要精确控制搜索参数\n"
+                    "- 调试搜索结果\n"
+                    "- 批量搜索操作\n\n"
+                    "推荐：大多数情况使用 memory.query 即可。"
                 ),
                 inputSchema={
                     "type": "object",
@@ -998,6 +1002,71 @@ async def main_async():
                         }
                     },
                     "required": ["query"]
+                }
+            ),
+            Tool(
+                name="sql.query",
+                description=(
+                    "[Advanced] SQL 查询 - 直接执行 SQL 查询。\n\n"
+                    "适用场景：\n"
+                    "- 复杂的数据分析\n"
+                    "- 自定义统计查询\n"
+                    "- 数据导出\n\n"
+                    "常用模板：\n"
+                    "- SELECT * FROM events WHERE text LIKE '%keyword%' LIMIT 10\n"
+                    "- SELECT COUNT(*) FROM events WHERE role='user'\n"
+                    "- SELECT session_id, COUNT(*) FROM events GROUP BY session_id\n\n"
+                    "⚠️ 只支持 SELECT 查询（只读）。"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "SQL SELECT 查询语句"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "结果数量限制",
+                            "default": 100
+                        }
+                    },
+                    "required": ["query"]
+                }
+            ),
+            Tool(
+                name="regex.search",
+                description=(
+                    "[Advanced] 正则表达式搜索 - 使用正则表达式搜索文本。\n\n"
+                    "适用场景：\n"
+                    "- 精确的模式匹配\n"
+                    "- 代码片段搜索\n"
+                    "- 特定格式查找\n\n"
+                    "示例：\n"
+                    "- async def \\w+\\(.*\\): 查找异步函数定义\n"
+                    "- \\d{3}-\\d{4}: 查找电话号码格式\n"
+                    "- https?://\\S+: 查找 URL\n\n"
+                    "支持 Python re 模块的正则语法。"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "正则表达式模式"
+                        },
+                        "flags": {
+                            "type": "string",
+                            "description": "正则标志 (i=忽略大小写, m=多行, s=点匹配换行)",
+                            "default": ""
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "结果数量限制",
+                            "default": 50
+                        }
+                    },
+                    "required": ["pattern"]
                 }
             ),
             Tool(
