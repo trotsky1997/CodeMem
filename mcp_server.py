@@ -197,10 +197,26 @@ async def bm25_search_async(query: str, limit: int = 20) -> Dict[str, Any]:
     # Wait for DB ready
     await asyncio.wait_for(_db_ready.wait(), timeout=120.0)
 
+    # Check if markdown directory exists
+    if not MD_SESSIONS_DIR.exists():
+        return {
+            "query": query,
+            "count": 0,
+            "results": [],
+            "error": "Markdown sessions directory not found. Database may be empty or not initialized.",
+            "hint": "Restart the MCP server to rebuild the database and export markdown files."
+        }
+
     # Build index if needed
     async with _bm25_lock:
         if _bm25_md_index is None:
-            pass  # Will be built in background
+            return {
+                "query": query,
+                "count": 0,
+                "results": [],
+                "error": "BM25 index not built yet. Please wait for initialization to complete.",
+                "hint": "The index is being built in the background. Try again in a few seconds."
+            }
 
     # Enforce limit
     limit = min(limit, 50)
