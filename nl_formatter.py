@@ -74,7 +74,13 @@ def format_search_results(
             "suggestions": [
                 "尝试使用更通用的关键词",
                 "查看最近的活动记录"
-            ]
+            ],
+            "metadata": {
+                "total_results": 0,
+                "unique_sessions": 0,
+                "source": source,
+                "query": query
+            }
         }
 
     # Generate summary
