@@ -46,6 +46,12 @@ from context_manager import (
     resolve_reference,
     is_followup_query
 )
+from query_rewriter import (
+    rewrite_query,
+    suggest_queries,
+    generate_did_you_mean,
+    analyze_query_quality
+)
 
 
 # Initialize tiktoken encoder
@@ -388,10 +394,11 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
     """
     Intelligent memory query interface with natural language support.
 
-    Phase 2 enhancements:
-    - Conversation context management
-    - Follow-up query support
-    - Reference resolution (指代词解析)
+    Phase 3 enhancements:
+    - Query rewriting and correction
+    - Spelling correction
+    - Query suggestions
+    - Quality analysis
 
     Args:
         query: Natural language query (e.g., "我之前讨论过 Python 异步吗？")
@@ -417,6 +424,10 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
 
         # Get or create conversation context
         ctx = await _context_manager.get_or_create(context)
+
+        # Phase 3: Query rewriting and correction
+        rewritten = rewrite_query(query)
+        query_to_use = rewritten["recommended"]
 
         # Check if this is a follow-up query
         is_followup = is_followup_query(query)
@@ -516,13 +527,13 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
                     }
 
         # Parse intent (normal query flow)
-        parsed = parse_intent(query)
+        parsed = parse_intent(query_to_use)
 
         # Route to appropriate handler based on intent
         if parsed.intent == QueryIntent.SEARCH_CONTENT:
             # Expand keywords with synonyms
             expanded_keywords = expand_synonyms(parsed.keywords)
-            search_query = " ".join(expanded_keywords) if expanded_keywords else query
+            search_query = " ".join(expanded_keywords) if expanded_keywords else query_to_use
 
             # Perform BM25 search
             search_results = await bm25_search_async(search_query, limit=20, source="both")
@@ -536,6 +547,20 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
 
             # Add context ID to metadata
             formatted["metadata"]["context_id"] = ctx.context_id
+
+            # Phase 3: Add query rewriting info
+            if rewritten["was_corrected"]:
+                formatted["insights"].insert(0, f"已自动纠正拼写：{query} → {query_to_use}")
+
+            # Phase 3: Generate suggestions
+            query_suggestions = suggest_queries(query, search_results.get("results", []))
+            if query_suggestions:
+                formatted["suggestions"].extend([f"相关搜索：{s}" for s in query_suggestions[:3]])
+
+            # Phase 3: Did you mean?
+            did_you_mean = generate_did_you_mean(query, search_results.get("results", []))
+            if did_you_mean and did_you_mean != query:
+                formatted["suggestions"].insert(0, f"你是不是想找：{did_you_mean}")
 
             # Convert to SearchResult objects and add to context
             search_result_objs = [

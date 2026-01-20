@@ -247,28 +247,121 @@ def expand_synonyms(keywords: list) -> list:
     """
     Expand keywords with synonyms.
 
+    Phase 3: Expanded to 50+ domain terms.
+
     Args:
         keywords: List of keywords
 
     Returns:
         Expanded list with synonyms
     """
-    # Domain-specific synonym dictionary
+    # Domain-specific synonym dictionary (Phase 3: Expanded)
     SYNONYMS = {
-        "异步": ["async", "asyncio", "协程", "coroutine", "concurrent", "并发"],
-        "async": ["异步", "asyncio", "协程", "coroutine", "concurrent"],
-        "数据库": ["database", "db", "sql", "sqlite", "postgresql", "mysql"],
-        "database": ["数据库", "db", "sql", "sqlite", "postgresql"],
-        "性能": ["performance", "optimization", "速度", "效率", "优化", "快"],
+        # Programming Languages
+        "python": ["py", "python3", "python2", "cpython", "pypy"],
+        "javascript": ["js", "node", "nodejs", "typescript", "ts", "ecmascript"],
+        "java": ["jvm", "openjdk", "jdk"],
+        "c++": ["cpp", "cxx", "c plus plus"],
+        "c#": ["csharp", "dotnet", ".net"],
+        "go": ["golang"],
+        "rust": ["rustlang"],
+        "ruby": ["rb"],
+
+        # Async/Concurrency
+        "异步": ["async", "asyncio", "协程", "coroutine", "concurrent", "并发", "asynchronous"],
+        "async": ["异步", "asyncio", "协程", "coroutine", "concurrent", "asynchronous"],
+        "并发": ["concurrent", "concurrency", "parallel", "异步", "async", "多线程"],
+        "concurrent": ["并发", "concurrency", "parallel", "异步", "async"],
+        "协程": ["coroutine", "async", "异步", "asyncio"],
+        "coroutine": ["协程", "async", "异步", "asyncio"],
+        "多线程": ["multithreading", "threading", "thread", "并发", "concurrent"],
+        "线程": ["thread", "threading"],
+        "进程": ["process", "multiprocessing"],
+
+        # Database
+        "数据库": ["database", "db", "sql", "sqlite", "postgresql", "mysql", "存储"],
+        "database": ["数据库", "db", "sql", "sqlite", "postgresql", "mysql"],
+        "sql": ["数据库", "database", "query", "查询"],
+        "nosql": ["mongodb", "redis", "cassandra", "非关系型"],
+        "缓存": ["cache", "caching", "redis", "memcached"],
+        "cache": ["缓存", "caching", "redis", "memcached"],
+
+        # Performance
+        "性能": ["performance", "optimization", "速度", "效率", "优化", "快", "慢"],
         "performance": ["性能", "optimization", "速度", "效率", "优化"],
-        "优化": ["optimization", "improve", "enhance", "性能", "提升"],
-        "optimization": ["优化", "improve", "enhance", "性能"],
-        "索引": ["index", "indexing", "bm25", "搜索"],
+        "优化": ["optimization", "optimize", "improve", "enhance", "性能", "提升", "改进"],
+        "optimization": ["优化", "optimize", "improve", "enhance", "性能"],
+        "速度": ["speed", "fast", "slow", "performance", "性能", "快", "慢"],
+        "效率": ["efficiency", "efficient", "performance", "性能"],
+        "快": ["fast", "quick", "rapid", "速度", "性能"],
+        "慢": ["slow", "sluggish", "速度", "性能"],
+
+        # Search/Index
+        "索引": ["index", "indexing", "bm25", "搜索", "检索"],
         "index": ["索引", "indexing", "bm25", "搜索"],
-        "python": ["py", "python3", "python2"],
-        "javascript": ["js", "node", "nodejs", "typescript", "ts"],
-        "错误": ["error", "bug", "问题", "issue", "exception"],
-        "error": ["错误", "bug", "问题", "issue", "exception"],
+        "搜索": ["search", "query", "find", "lookup", "索引", "检索", "查找"],
+        "search": ["搜索", "query", "find", "lookup", "索引"],
+        "查询": ["query", "search", "find", "搜索", "检索"],
+        "query": ["查询", "search", "find", "搜索"],
+
+        # Error/Bug
+        "错误": ["error", "bug", "问题", "issue", "exception", "异常", "故障"],
+        "error": ["错误", "bug", "问题", "issue", "exception", "异常"],
+        "bug": ["错误", "error", "问题", "issue", "缺陷"],
+        "问题": ["issue", "problem", "bug", "错误", "故障"],
+        "issue": ["问题", "bug", "error", "错误"],
+        "异常": ["exception", "error", "错误"],
+        "exception": ["异常", "error", "错误"],
+
+        # Testing
+        "测试": ["test", "testing", "unittest", "pytest", "检验"],
+        "test": ["测试", "testing", "unittest", "pytest"],
+        "单元测试": ["unit test", "unittest", "test"],
+        "集成测试": ["integration test", "test"],
+
+        # API/Web
+        "api": ["接口", "interface", "endpoint", "rest", "graphql"],
+        "接口": ["api", "interface", "endpoint"],
+        "rest": ["restful", "api", "http"],
+        "http": ["https", "web", "request", "response"],
+        "请求": ["request", "http", "api"],
+        "响应": ["response", "http", "api"],
+
+        # Architecture
+        "架构": ["architecture", "design", "structure", "设计"],
+        "architecture": ["架构", "design", "structure", "设计"],
+        "设计": ["design", "architecture", "pattern", "架构"],
+        "design": ["设计", "architecture", "pattern", "架构"],
+        "模式": ["pattern", "design pattern", "设计模式"],
+        "pattern": ["模式", "design pattern", "设计模式"],
+
+        # Data Structures
+        "数组": ["array", "list", "列表"],
+        "array": ["数组", "list", "列表"],
+        "列表": ["list", "array", "数组"],
+        "list": ["列表", "array", "数组"],
+        "字典": ["dict", "dictionary", "map", "hash", "映射"],
+        "dict": ["字典", "dictionary", "map", "hash"],
+        "集合": ["set", "collection"],
+        "set": ["集合", "collection"],
+
+        # Operations
+        "安装": ["install", "setup", "配置"],
+        "install": ["安装", "setup", "配置"],
+        "配置": ["config", "configuration", "setup", "设置", "安装"],
+        "config": ["配置", "configuration", "setup", "设置"],
+        "部署": ["deploy", "deployment", "发布"],
+        "deploy": ["部署", "deployment", "发布"],
+        "运行": ["run", "execute", "启动"],
+        "run": ["运行", "execute", "启动"],
+
+        # Documentation
+        "文档": ["documentation", "docs", "document"],
+        "documentation": ["文档", "docs", "document"],
+        "教程": ["tutorial", "guide", "howto"],
+        "tutorial": ["教程", "guide", "howto"],
+        "示例": ["example", "sample", "demo"],
+        "example": ["示例", "sample", "demo"],
     }
 
     expanded = set(keywords)
