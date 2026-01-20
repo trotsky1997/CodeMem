@@ -954,40 +954,15 @@ async def main_async():
         """List available tools."""
         return [
             Tool(
-                name="memory.query",
-                description=(
-                    "🌟 智能记忆查询 (推荐) - 使用自然语言查询对话历史。\n\n"
-                    "支持的查询类型：\n"
-                    "- 搜索内容：「我之前讨论过 Python 异步吗？」\n"
-                    "- 查找会话：「上周关于数据库的对话」\n"
-                    "- 活动摘要：「最近在做什么？」\n"
-                    "- 获取上下文：「那段代码的完整上下文」\n\n"
-                    "返回自然语言响应，包含摘要、洞察和建议。"
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "自然语言查询，例如：「我之前讨论过 Python 异步吗？」"
-                        },
-                        "context": {
-                            "type": "string",
-                            "description": "可选的对话上下文 ID，用于 follow-up 查询 (Phase 2 功能)"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            ),
-            Tool(
                 name="semantic.search",
                 description=(
-                    "[Advanced] BM25 语义搜索 - 直接访问底层搜索引擎。\n\n"
-                    "适用场景：\n"
-                    "- 需要精确控制搜索参数\n"
-                    "- 调试搜索结果\n"
-                    "- 批量搜索操作\n\n"
-                    "推荐：大多数情况使用 memory.query 即可。"
+                    "BM25 语义搜索 - 搜索对话历史。\n\n"
+                    "使用 BM25 算法进行语义搜索，支持中英文分词。\n\n"
+                    "参数：\n"
+                    "- query: 搜索查询\n"
+                    "- top_k: 返回结果数量（默认 20）\n"
+                    "- source: 搜索来源 (sql/markdown/both，默认 both)\n\n"
+                    "返回：匹配的对话记录，按相关性排序。"
                 ),
                 inputSchema={
                     "type": "object",
@@ -1007,7 +982,7 @@ async def main_async():
             Tool(
                 name="sql.query",
                 description=(
-                    "[Advanced] SQL 查询 - 直接执行 SQL 查询。\n\n"
+                    "SQL 查询 - 直接执行 SQL 查询。\n\n"
                     "适用场景：\n"
                     "- 复杂的数据分析\n"
                     "- 自定义统计查询\n"
@@ -1037,7 +1012,7 @@ async def main_async():
             Tool(
                 name="regex.search",
                 description=(
-                    "[Advanced] 正则表达式搜索 - 使用正则表达式搜索文本。\n\n"
+                    "正则表达式搜索 - 使用正则表达式搜索文本。\n\n"
                     "适用场景：\n"
                     "- 精确的模式匹配\n"
                     "- 代码片段搜索\n"
@@ -1069,97 +1044,13 @@ async def main_async():
                     "required": ["pattern"]
                 }
             ),
-            Tool(
-                name="memory.insights",
-                description=(
-                    "🔍 记忆洞察 - 分析用户行为模式和知识演进。\n\n"
-                    "功能：\n"
-                    "- 高频话题分析\n"
-                    "- 活动时间模式\n"
-                    "- 知识演进追踪\n"
-                    "- 未解决问题发现\n\n"
-                    "返回详细的洞察报告。"
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "days": {
-                            "type": "integer",
-                            "description": "分析天数（默认 30 天）",
-                            "default": 30
-                        },
-                        "topic": {
-                            "type": "string",
-                            "description": "可选：分析特定话题的知识演进"
-                        }
-                    }
-                }
-            ),
-            Tool(
-                name="memory.clusters",
-                description=(
-                    "🔗 模式聚类 - 聚合和分析相似模式。\n\n"
-                    "功能：\n"
-                    "- 相似查询聚类\n"
-                    "- 话题层级聚合\n"
-                    "- 会话类型分类\n"
-                    "- 重复问题识别\n\n"
-                    "返回聚类分析报告。"
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "days": {
-                            "type": "integer",
-                            "description": "分析天数（默认 30 天）",
-                            "default": 30
-                        }
-                    }
-                }
-            ),
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         """Handle tool calls."""
         try:
-            if name == "memory.query":
-                query = arguments.get("query", "")
-                context = arguments.get("context")
-
-                result = await memory_query_async(query, context)
-
-                # Format response as readable text
-                response_text = f"# {result.get('summary', '')}\n\n"
-
-                if result.get("insights"):
-                    response_text += "## 💡 洞察\n"
-                    for insight in result["insights"]:
-                        response_text += f"- {insight}\n"
-                    response_text += "\n"
-
-                if result.get("key_findings"):
-                    response_text += "## 🔍 关键发现\n"
-                    for finding in result["key_findings"]:
-                        if isinstance(finding, dict):
-                            rank = finding.get("rank", "")
-                            session = finding.get("session", "")
-                            text = finding.get("text", "")
-                            score = finding.get("score", "")
-
-                            if rank:
-                                response_text += f"\n### {rank}. {session} (相关度: {score})\n"
-                            response_text += f"{text}\n"
-                    response_text += "\n"
-
-                if result.get("suggestions"):
-                    response_text += "## 💭 建议\n"
-                    for suggestion in result["suggestions"]:
-                        response_text += f"- {suggestion}\n"
-
-                return [TextContent(type="text", text=response_text)]
-
-            elif name == "semantic.search":
+            if name == "semantic.search":
                 query = arguments.get("query", "")
                 top_k = arguments.get("top_k", 20)
                 source = arguments.get("source", "both")
@@ -1167,90 +1058,81 @@ async def main_async():
                 result = await bm25_search_async(query, limit=top_k, source=source)
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
-            elif name == "memory.insights":
-                days = arguments.get("days", 30)
-                topic = arguments.get("topic")
+            elif name == "sql.query":
+                query = arguments.get("query", "")
+                limit = arguments.get("limit", 100)
 
-                # Get events from database
+                # Security: only allow SELECT queries
+                if not query.strip().upper().startswith("SELECT"):
+                    return [TextContent(type="text", text="Error: Only SELECT queries are allowed")]
+
+                conn = await get_db_connection()
+                cursor = await conn.execute(query)
+                rows = await cursor.fetchall()
+
+                # Limit results
+                rows = rows[:limit]
+
+                # Format as JSON
+                columns = [desc[0] for desc in cursor.description] if cursor.description else []
+                result = {
+                    "columns": columns,
+                    "rows": [dict(zip(columns, row)) for row in rows],
+                    "count": len(rows)
+                }
+
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            elif name == "regex.search":
+                pattern = arguments.get("pattern", "")
+                flags_str = arguments.get("flags", "")
+                limit = arguments.get("limit", 50)
+
+                # Parse flags
+                import re
+                flags = 0
+                if 'i' in flags_str:
+                    flags |= re.IGNORECASE
+                if 'm' in flags_str:
+                    flags |= re.MULTILINE
+                if 's' in flags_str:
+                    flags |= re.DOTALL
+
+                # Search in database
                 conn = await get_db_connection()
                 cursor = await conn.execute("""
                     SELECT timestamp, role, text, session_id, platform
                     FROM events
-                    WHERE timestamp >= datetime('now', '-' || ? || ' days')
                     ORDER BY timestamp DESC
                     LIMIT 1000
-                """, (days,))
+                """)
 
                 rows = await cursor.fetchall()
 
-                # Convert to event dicts
-                events = []
+                # Apply regex
+                matches = []
+                regex = re.compile(pattern, flags)
+
                 for row in rows:
-                    events.append({
-                        "timestamp": row[0],
-                        "role": row[1],
-                        "text": row[2],
-                        "session_id": row[3],
-                        "platform": row[4]
-                    })
+                    text = row[2]
+                    if regex.search(text):
+                        matches.append({
+                            "timestamp": row[0],
+                            "role": row[1],
+                            "text": text,
+                            "session_id": row[3],
+                            "platform": row[4]
+                        })
 
-                # Analyze patterns
-                analyzer = PatternAnalyzer(events)
+                        if len(matches) >= limit:
+                            break
 
-                if topic:
-                    # Analyze specific topic evolution
-                    evolution = analyzer.analyze_knowledge_evolution(topic)
-                    response_text = f"# {topic} 知识演进分析\n\n"
-                    response_text += f"**讨论次数**: {evolution['total_discussions']}\n"
-                    response_text += f"**进展**: {evolution['progression']}\n\n"
+                result = {
+                    "pattern": pattern,
+                    "count": len(matches),
+                    "matches": matches
+                }
 
-                    if evolution['stages']:
-                        response_text += "## 讨论阶段\n"
-                        for stage in evolution['stages'][:5]:
-                            response_text += f"- {stage['stage']}: {stage['text_preview'][:80]}...\n"
-                else:
-                    # Generate full insights report
-                    insights_report = analyzer.generate_insights_report(days=days)
-                    response_text = format_insights_report(insights_report)
-
-                return [TextContent(type="text", text=response_text)]
-
-            elif name == "memory.clusters":
-                days = arguments.get("days", 30)
-
-                # Get events from database
-                conn = await get_db_connection()
-                cursor = await conn.execute("""
-                    SELECT timestamp, role, text, session_id, platform
-                    FROM events
-                    WHERE timestamp >= datetime('now', '-' || ? || ' days')
-                    ORDER BY timestamp DESC
-                    LIMIT 1000
-                """, (days,))
-
-                rows = await cursor.fetchall()
-
-                # Convert to event dicts
-                events = []
-                for row in rows:
-                    events.append({
-                        "timestamp": row[0],
-                        "role": row[1],
-                        "text": row[2],
-                        "session_id": row[3],
-                        "platform": row[4]
-                    })
-
-                # Perform clustering
-                clusterer = PatternClusterer(events)
-                aggregation_report = clusterer.generate_aggregation_report()
-                response_text = format_aggregation_report(aggregation_report)
-
-                return [TextContent(type="text", text=response_text)]
-
-            elif name == "activity.recent":
-                days = arguments.get("days", 7)
-                result = await get_recent_activity_async(days=days)
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
             else:
