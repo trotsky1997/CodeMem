@@ -56,6 +56,10 @@ from pattern_analyzer import (
     PatternAnalyzer,
     format_insights_report
 )
+from pattern_clusterer import (
+    PatternClusterer,
+    format_aggregation_report
+)
 
 
 # Initialize tiktoken encoder
@@ -1022,6 +1026,28 @@ async def main_async():
                     }
                 }
             ),
+            Tool(
+                name="memory.clusters",
+                description=(
+                    "🔗 模式聚类 - 聚合和分析相似模式。\n\n"
+                    "功能：\n"
+                    "- 相似查询聚类\n"
+                    "- 话题层级聚合\n"
+                    "- 会话类型分类\n"
+                    "- 重复问题识别\n\n"
+                    "返回聚类分析报告。"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "days": {
+                            "type": "integer",
+                            "description": "分析天数（默认 30 天）",
+                            "default": 30
+                        }
+                    }
+                }
+            ),
         ]
 
     @server.call_tool()
@@ -1117,6 +1143,39 @@ async def main_async():
                     # Generate full insights report
                     insights_report = analyzer.generate_insights_report(days=days)
                     response_text = format_insights_report(insights_report)
+
+                return [TextContent(type="text", text=response_text)]
+
+            elif name == "memory.clusters":
+                days = arguments.get("days", 30)
+
+                # Get events from database
+                conn = await get_db_connection()
+                cursor = await conn.execute("""
+                    SELECT timestamp, role, text, session_id, platform
+                    FROM events
+                    WHERE timestamp >= datetime('now', '-' || ? || ' days')
+                    ORDER BY timestamp DESC
+                    LIMIT 1000
+                """, (days,))
+
+                rows = await cursor.fetchall()
+
+                # Convert to event dicts
+                events = []
+                for row in rows:
+                    events.append({
+                        "timestamp": row[0],
+                        "role": row[1],
+                        "text": row[2],
+                        "session_id": row[3],
+                        "platform": row[4]
+                    })
+
+                # Perform clustering
+                clusterer = PatternClusterer(events)
+                aggregation_report = clusterer.generate_aggregation_report()
+                response_text = format_aggregation_report(aggregation_report)
 
                 return [TextContent(type="text", text=response_text)]
 
