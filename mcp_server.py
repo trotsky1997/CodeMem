@@ -311,6 +311,34 @@ async def build_db_async(db_path: Path, include_history: bool, extra_roots: List
     global _db_build_error
 
     try:
+        # Add default platform paths if no extra_roots provided
+        if not extra_roots:
+            home = Path.home()
+            if sys.platform == "win32":
+                cursor_path = home / "AppData" / "Roaming" / "Cursor" / "User"
+                opencode_path = home / "AppData" / "Local" / "opencode" / "project"
+                claude_base = home / "AppData" / "Roaming" / ".claude"
+                codex_base = home / "AppData" / "Roaming" / ".codex"
+            elif sys.platform == "darwin":
+                cursor_path = home / "Library" / "Application Support" / "Cursor" / "User"
+                opencode_path = home / "Library" / "Application Support" / "opencode" / "project"
+                claude_base = home / ".claude"
+                codex_base = home / ".codex"
+            else:  # Linux
+                cursor_path = home / ".config" / "Cursor" / "User"
+                opencode_path = home / ".config" / "opencode" / "project"
+                claude_base = home / ".claude"
+                codex_base = home / ".codex"
+
+            # Add paths that exist
+            default_roots = []
+            for path in [claude_base, codex_base, cursor_path, opencode_path]:
+                if path.exists():
+                    default_roots.append(path)
+
+            extra_roots = default_roots
+            print(f"Using default paths: {[str(p) for p in extra_roots]}", file=sys.stderr)
+
         # Run CPU-intensive work in thread pool
         loop = asyncio.get_event_loop()
 
