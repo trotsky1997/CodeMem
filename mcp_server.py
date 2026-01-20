@@ -32,6 +32,13 @@ sys.path.append(str(Path(__file__).parent))
 
 from unified_history import collect_files, load_records, to_df
 from export_sessions_md import export_sessions
+from intent_recognition import parse_intent, QueryIntent, expand_synonyms
+from nl_formatter import (
+    format_search_results,
+    format_activity_summary,
+    format_error_response,
+    format_context_response
+)
 
 
 # Initialize tiktoken encoder
@@ -367,6 +374,147 @@ async def get_recent_activity_async(days: int = 7) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Intelligent memory query interface with natural language support.
+
+    This is the main entry point for Phase 1 Agent Experience First redesign.
+
+    Args:
+        query: Natural language query (e.g., "我之前讨论过 Python 异步吗？")
+        context: Optional conversation context ID for follow-up queries
+
+    Returns:
+        Natural language response with summary, insights, and suggestions
+    """
+    try:
+        # Wait for DB ready
+        await asyncio.wait_for(_db_ready.wait(), timeout=120.0)
+
+        if _db_build_error:
+            return format_error_response(_db_build_error, query)
+
+        # Parse intent
+        parsed = parse_intent(query)
+
+        # Route to appropriate handler based on intent
+        if parsed.intent == QueryIntent.SEARCH_CONTENT:
+            # Expand keywords with synonyms
+            expanded_keywords = expand_synonyms(parsed.keywords)
+            search_query = " ".join(expanded_keywords) if expanded_keywords else query
+
+            # Perform BM25 search
+            search_results = await bm25_search_async(search_query, limit=20, source="both")
+
+            # Format as natural language
+            return format_search_results(
+                query=query,
+                results=search_results.get("results", []),
+                source=search_results.get("source", "both")
+            )
+
+        elif parsed.intent == QueryIntent.ACTIVITY_SUMMARY:
+            # Determine days from time range
+            days = 7  # default
+            if parsed.time_range:
+                start_time, end_time = parsed.time_range
+                days = (end_time - start_time).days or 1
+
+            # Get activity data
+            activity_data = await get_recent_activity_async(days=days)
+
+            # Format as natural language
+            return format_activity_summary(activity_data)
+
+        elif parsed.intent == QueryIntent.GET_CONTEXT:
+            # Try to extract session_id and item_index from keywords
+            # For now, perform a search and return detailed context
+            search_results = await bm25_search_async(query, limit=5, source="both")
+
+            if search_results.get("results"):
+                # Return first result with more context
+                return format_search_results(
+                    query=query,
+                    results=search_results.get("results", []),
+                    source=search_results.get("source", "both")
+                )
+            else:
+                return format_error_response("未找到相关上下文", query)
+
+        elif parsed.intent == QueryIntent.FIND_SESSION:
+            # Search for sessions with time filter
+            search_query = " ".join(parsed.keywords) if parsed.keywords else query
+            search_results = await bm25_search_async(search_query, limit=20, source="both")
+
+            # Format with session grouping
+            return format_search_results(
+                query=query,
+                results=search_results.get("results", []),
+                source=search_results.get("source", "both")
+            )
+
+        elif parsed.intent == QueryIntent.EXPORT:
+            # For now, guide user to use session.export tool
+            return {
+                "summary": "导出功能需要指定会话 ID。",
+                "insights": [
+                    "请先搜索找到要导出的会话",
+                    "然后使用 session.export 工具导出"
+                ],
+                "key_findings": [],
+                "suggestions": [
+                    "搜索相关对话以获取会话 ID",
+                    "使用 session.list 查看最近的会话"
+                ],
+                "metadata": {
+                    "query": query,
+                    "intent": "export"
+                }
+            }
+
+        elif parsed.intent == QueryIntent.PATTERN_DISCOVERY:
+            # Pattern discovery - future implementation
+            # For now, return activity summary as a proxy
+            activity_data = await get_recent_activity_async(days=30)
+            response = format_activity_summary(activity_data)
+            response["insights"].insert(0, "模式发现功能正在开发中，这里显示最近 30 天的活动摘要")
+            return response
+
+        else:
+            # UNKNOWN intent - try search as fallback
+            search_results = await bm25_search_async(query, limit=20, source="both")
+
+            if search_results.get("results"):
+                return format_search_results(
+                    query=query,
+                    results=search_results.get("results", []),
+                    source=search_results.get("source", "both")
+                )
+            else:
+                return {
+                    "summary": f"无法理解查询「{query}」。",
+                    "insights": [
+                        "尝试使用更具体的关键词",
+                        "或者描述你想查找的内容"
+                    ],
+                    "key_findings": [],
+                    "suggestions": [
+                        "查看最近的活动：「最近在做什么？」",
+                        "搜索特定话题：「讨论过 Python 吗？」",
+                        "查找某个时间的对话：「上周的对话」"
+                    ],
+                    "metadata": {
+                        "query": query,
+                        "intent": "unknown"
+                    }
+                }
+
+    except asyncio.TimeoutError:
+        return format_error_response("数据库初始化超时", query)
+    except Exception as e:
+        return format_error_response(str(e), query)
+
+
 async def build_db_async(db_path: Path, include_history: bool, extra_roots: List[Path]):
     """Build database asynchronously."""
     global _db_build_error
@@ -462,7 +610,7 @@ async def build_db_async(db_path: Path, include_history: bool, extra_roots: List
 
 
 async def main_async():
-    """Async main function."""
+    """Async main function with MCP server."""
     global _db_path
 
     parser = argparse.ArgumentParser()
@@ -489,18 +637,138 @@ async def main_async():
         # Build indexes in background
         asyncio.create_task(build_bm25_indexes_parallel())
 
-    print("Async MCP server ready")
-    print(f"Database: {_db_path}")
-    print("Optimizations: async I/O, concurrent requests, parallel indexing")
+    # Start MCP server
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+    from mcp.types import Tool, TextContent
 
-    # Keep server running
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        if _db_pool:
-            await _db_pool.close()
+    server = Server("codemem")
+
+    @server.list_tools()
+    async def list_tools() -> list[Tool]:
+        """List available tools."""
+        return [
+            Tool(
+                name="memory.query",
+                description=(
+                    "🌟 智能记忆查询 (推荐) - 使用自然语言查询对话历史。\n\n"
+                    "支持的查询类型：\n"
+                    "- 搜索内容：「我之前讨论过 Python 异步吗？」\n"
+                    "- 查找会话：「上周关于数据库的对话」\n"
+                    "- 活动摘要：「最近在做什么？」\n"
+                    "- 获取上下文：「那段代码的完整上下文」\n\n"
+                    "返回自然语言响应，包含摘要、洞察和建议。"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "自然语言查询，例如：「我之前讨论过 Python 异步吗？」"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "可选的对话上下文 ID，用于 follow-up 查询 (Phase 2 功能)"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            ),
+            Tool(
+                name="semantic.search",
+                description=(
+                    "[Legacy] BM25 语义搜索 - 在对话历史中搜索相关内容。\n"
+                    "推荐使用 memory.query 代替。"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "搜索查询"},
+                        "top_k": {"type": "integer", "description": "返回结果数量", "default": 20},
+                        "source": {
+                            "type": "string",
+                            "enum": ["sql", "markdown", "both"],
+                            "description": "搜索来源",
+                            "default": "both"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            ),
+            Tool(
+                name="activity.recent",
+                description="[Legacy] 获取最近的活动记录。推荐使用 memory.query 代替。",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "days": {"type": "integer", "description": "天数", "default": 7}
+                    }
+                }
+            )
+        ]
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+        """Handle tool calls."""
+        try:
+            if name == "memory.query":
+                query = arguments.get("query", "")
+                context = arguments.get("context")
+
+                result = await memory_query_async(query, context)
+
+                # Format response as readable text
+                response_text = f"# {result.get('summary', '')}\n\n"
+
+                if result.get("insights"):
+                    response_text += "## 💡 洞察\n"
+                    for insight in result["insights"]:
+                        response_text += f"- {insight}\n"
+                    response_text += "\n"
+
+                if result.get("key_findings"):
+                    response_text += "## 🔍 关键发现\n"
+                    for finding in result["key_findings"]:
+                        if isinstance(finding, dict):
+                            rank = finding.get("rank", "")
+                            session = finding.get("session", "")
+                            text = finding.get("text", "")
+                            score = finding.get("score", "")
+
+                            if rank:
+                                response_text += f"\n### {rank}. {session} (相关度: {score})\n"
+                            response_text += f"{text}\n"
+                    response_text += "\n"
+
+                if result.get("suggestions"):
+                    response_text += "## 💭 建议\n"
+                    for suggestion in result["suggestions"]:
+                        response_text += f"- {suggestion}\n"
+
+                return [TextContent(type="text", text=response_text)]
+
+            elif name == "semantic.search":
+                query = arguments.get("query", "")
+                top_k = arguments.get("top_k", 20)
+                source = arguments.get("source", "both")
+
+                result = await bm25_search_async(query, limit=top_k, source=source)
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            elif name == "activity.recent":
+                days = arguments.get("days", 7)
+                result = await get_recent_activity_async(days=days)
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            else:
+                return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error: {str(e)}")]
+
+    # Run MCP server
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 def main():

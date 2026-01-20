@@ -1,5 +1,90 @@
 # 更新日志
 
+## [0.3.0] - 2026-01-20 - Phase 1: Agent Experience First
+
+### 🎉 重大更新
+
+**新增智能记忆查询接口 `memory.query`**
+
+这是 Agent Experience First 重设计的第一阶段，将 CodeMem 从"工具集合"转变为"智能记忆助手"。
+
+### 新增功能
+
+- **自然语言查询支持**
+  - 支持完全自然的中英文查询
+  - 自动意图识别（6 种意图类型）
+  - 时间表达式解析（昨天、上周、最近等）
+  - 同义词自动扩展（异步 → async, asyncio, 协程等）
+
+- **智能意图识别**
+  - `SEARCH_CONTENT` - 搜索内容："我之前讨论过 Python 异步吗？"
+  - `FIND_SESSION` - 查找会话："上周关于数据库的对话"
+  - `ACTIVITY_SUMMARY` - 活动摘要："最近在做什么？"
+  - `GET_CONTEXT` - 获取上下文："那段代码的完整上下文"
+  - `EXPORT` - 导出："导出那次对话"
+  - `PATTERN_DISCOVERY` - 模式发现："我经常问什么问题？"
+
+- **自然语言响应格式化**
+  - 摘要（Summary）- 简洁的结果概述
+  - 洞察（Insights）- 数据来源、时间、分布等信息
+  - 关键发现（Key Findings）- Top 3 结果详情
+  - 建议（Suggestions）- 后续操作建议
+
+- **新增模块**
+  - `intent_recognition.py` - 意图识别和查询解析
+  - `nl_formatter.py` - 自然语言响应格式化
+  - `test_phase1.py` - Phase 1 测试套件
+
+### 向后兼容
+
+- ✅ 保留所有旧工具（标记为 [Legacy]）
+- ✅ `semantic.search` 仍然可用
+- ✅ `activity.recent` 仍然可用
+- ✅ 推荐使用新的 `memory.query` 接口
+
+### 技术改进
+
+- 同义词词典支持 10+ 领域词汇
+- 时间表达式支持 8+ 常用格式
+- 测试覆盖率显著提升
+
+### 依赖变化
+
+- 新增 `mcp>=0.9.0` - MCP 协议支持
+
+### 文档
+
+- 新增 `CHANGELOG_v0.3.0.md` - 详细的 v0.3.0 说明
+- 更新 `AGENT_EXPERIENCE_REDESIGN.md` - Phase 1 完成标记
+
+### 下一步
+
+Phase 2 将添加对话上下文管理和 follow-up 查询支持。
+
+---
+
+## [0.2.0] - 2026-01-20 - Async Only
+
+### 重大变更 (BREAKING CHANGES)
+
+- **移除同步版本**
+  - 删除 `mcp_server_sync.py`
+  - 仅保留异步版本 `mcp_server.py`
+  - 单一入口点：`codemem-mcp`
+
+### 依赖变化
+
+- `aiosqlite>=0.22.0` 现在是必需依赖（之前是可选）
+- 移除 `[async]` 可选依赖组
+
+### 性能
+
+- 索引构建速度提升 50%（并行构建）
+- 并发吞吐量提升 10 倍
+- 100 并发请求下性能提升 88%
+
+---
+
 ## [0.1.2] - 2026-01-20
 
 ### 新增
