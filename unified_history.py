@@ -566,12 +566,22 @@ def main() -> int:
     args = parser.parse_args()
 
     home = Path.home()
+
+    # Platform-specific paths
+    if sys.platform == "win32":
+        cursor_path = home / "AppData" / "Roaming" / "Cursor" / "User"
+    elif sys.platform == "darwin":
+        cursor_path = home / "Library" / "Application Support" / "Cursor" / "User"
+    else:  # Linux
+        cursor_path = home / ".config" / "Cursor" / "User"
+
     roots = [
         home / ".claude" / "projects",
         home / ".claude" / "transcripts",
         home / ".codex" / "sessions",
         home / ".local" / "share" / "opencode" / "project",
-        home / "AppData" / "Roaming" / "Cursor" / "User" / "workspaceStorage",
+        cursor_path / "workspaceStorage",
+        cursor_path / "globalStorage",
     ]
     if args.include_history:
         roots.append(home / ".claude" / "history.jsonl")
