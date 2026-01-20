@@ -1,7 +1,7 @@
 [project]
 name = "codemem-mcp"
-version = "0.1.1"
-description = "CodeMem MCP server with SQL query tool"
+version = "0.1.2"
+description = "CodeMem MCP server with dual-index BM25 search"
 requires-python = ">=3.10"
 dependencies = [
   "pandas>=2.0.0",

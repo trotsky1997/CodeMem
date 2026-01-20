@@ -149,14 +149,27 @@ codex mcp add codemem -- python /path/to/codemem/mcp_server.py --db /path/to/.co
 **参数:**
 - `query` (string, 必需) - 搜索查询
 - `limit` (int, 默认 20) - 最大结果数（最大 50）
+- `source` (string, 默认 "sql") - 数据源选择
+  - `"sql"` - 搜索 SQLite 数据库（默认，最快）
+  - `"markdown"` - 搜索 Markdown 会话文件（最全面）
+  - `"both"` - 同时搜索两个数据源（最完整）
 
 **使用场景:**
 - "找到关于 Python 调试的对话"
 - "搜索数据库优化相关内容"
 
+**数据源对比:**
+- **SQL**: 结构化数据，查询快速，限制 10,000 条记录
+- **Markdown**: 全文搜索，包含所有历史会话，无限制
+- **Both**: 合并两个索引的结果，按相关性排序
+
 **示例:**
 ```json
 {"name": "semantic.search", "arguments": {"query": "Python debugging", "limit": 20}}
+```
+
+```json
+{"name": "semantic.search", "arguments": {"query": "数据库优化", "source": "both", "limit": 30}}
 ```
 
 ### Tier 3: 高级工具

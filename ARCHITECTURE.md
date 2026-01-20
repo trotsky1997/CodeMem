@@ -266,6 +266,39 @@ def get_platform_stats(conn: sqlite3.Connection, days: int = 30):
 
 ### 语义搜索实现
 
+CodeMem 实现了**双索引架构**，提供两种独立的 BM25 搜索索引：
+
+#### 架构概览
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   semantic.search                        │
+│                  (source parameter)                      │
+└────────────┬────────────────────────────┬───────────────┘
+             │                            │
+    ┌────────▼────────┐          ┌───────▼────────┐
+    │   SQL Index     │          │  Markdown Index │
+    │   (BM25Okapi)   │          │   (BM25Okapi)   │
+    └────────┬────────┘          └───────┬─────────┘
+             │                            │
+    ┌────────▼────────┐          ┌───────▼─────────┐
+    │  SQLite DB      │          │  MD Files       │
+    │  (10k records)  │          │  (unlimited)    │
+    └─────────────────┘          └─────────────────┘
+```
+
+#### 双索引对比
+
+| 特性 | SQL 索引 | Markdown 索引 |
+|------|---------|--------------|
+| **数据源** | SQLite events 表 | Markdown 会话文件 |
+| **记录数** | 最多 10,000 条 | 无限制 |
+| **构建速度** | 快（结构化查询） | 中等（文件解析） |
+| **查询速度** | 非常快 | 快 |
+| **数据完整性** | 最近的记录 | 所有历史记录 |
+| **元数据** | platform, event_id | file, session_id |
+| **适用场景** | 快速查询最近对话 | 全历史搜索 |
+
 #### BM25 算法
 
 BM25 (Best Matching 25) 是一种概率检索模型，用于文档排序。
@@ -305,31 +338,114 @@ def smart_tokenize(text: str) -> List[str]:
 - 与 GPT 模型一致的分词
 - 更准确的语义匹配
 
-#### 索引构建
+#### SQL 索引构建
 
 ```python
 def build_bm25_index(db_path: Path):
-    """构建 BM25 索引"""
-    # 1. 从数据库加载可索引文本
+    """构建 SQL BM25 索引"""
+    # 1. 从数据库加载可索引文本（最多 10,000 条）
+    cursor.execute("""
+        SELECT event_id, timestamp, role, text, session_id, platform
+        FROM events
+        WHERE text IS NOT NULL AND text != ''
+        ORDER BY timestamp DESC
+        LIMIT 10000
+    """)
+
     # 2. 使用 smart_tokenize 分词
     # 3. 构建 BM25Okapi 索引
     # 4. 保存元数据（session_id, role, platform 等）
 ```
 
-**优化点：**
-- 仅索引 `is_indexable=1` 的内容
-- 使用 `index_text` 字段（优化后的文本）
-- 后台异步构建，不阻塞启动
+**特点：**
+- 限制 10,000 条记录，保证快速构建
+- 按时间倒序，优先索引最近的对话
+- 包含完整的元数据（platform, event_id）
+
+#### Markdown 索引构建
+
+```python
+def build_bm25_md_index(md_sessions_dir: Path):
+    """构建 Markdown BM25 索引"""
+    # 1. 扫描所有 .md 文件
+    md_files = list(md_sessions_dir.glob("*.md"))
+
+    # 2. 解析每个文件
+    for md_file in md_files:
+        content = md_file.read_text(encoding="utf-8")
+
+        # 3. 使用正则表达式提取消息
+        # 匹配格式: ### [role] timestamp
+        messages = re.split(r'\n### \[(.*?)\] (.*?)\n', content)
+
+        # 4. 对每条消息分词并索引
+        for role, timestamp, text in messages:
+            tokens = smart_tokenize(text)
+            _bm25_md_docs.append(tokens)
+            _bm25_md_metadata.append({
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "role": role,
+                "text": text,
+                "source": "markdown",
+                "file": md_file.name
+            })
+
+    # 5. 构建 BM25Okapi 索引
+    _bm25_md_index = BM25Okapi(_bm25_md_docs)
+```
+
+**特点：**
+- 无记录数限制，索引所有历史
+- 直接从 Markdown 文件解析
+- 包含文件名和 session_id 元数据
+- 适合全历史搜索
 
 #### 搜索执行
 
 ```python
-def bm25_search(query: str, limit: int = 20):
-    """执行 BM25 搜索"""
-    # 1. 等待索引构建完成
-    # 2. 对查询分词
-    # 3. 计算 BM25 分数
-    # 4. 返回 Top-K 结果
+def bm25_search(query: str, limit: int = 20, source: str = "sql"):
+    """执行 BM25 搜索
+
+    Args:
+        query: 搜索查询
+        limit: 最大结果数
+        source: 数据源 - "sql", "markdown", 或 "both"
+    """
+    # 1. 检查缓存
+    # 2. 等待索引构建完成
+    # 3. 对查询分词
+
+    results = []
+
+    # 4a. 搜索 SQL 索引
+    if source in ("sql", "both"):
+        scores = _bm25_index.get_scores(query_tokens)
+        # 获取 Top-K 结果
+
+    # 4b. 搜索 Markdown 索引
+    if source in ("markdown", "both"):
+        md_scores = _bm25_md_index.get_scores(query_tokens)
+        # 获取 Top-K 结果
+
+    # 5. 合并结果（如果 source="both"）
+    if source == "both":
+        results = sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
+
+    # 6. 返回结果
+    return {"query": query, "count": len(results), "results": results, "source": source}
+```
+
+**使用示例：**
+```python
+# 仅搜索 SQL（默认，最快）
+bm25_search("Python debugging", limit=20, source="sql")
+
+# 仅搜索 Markdown（全历史）
+bm25_search("数据库优化", limit=20, source="markdown")
+
+# 搜索两个索引（最全面）
+bm25_search("bug fix", limit=30, source="both")
 ```
 
 ## 缓存系统
