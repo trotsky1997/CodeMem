@@ -10,6 +10,7 @@ import argparse
 import json
 import hashlib
 import re
+import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -137,6 +138,8 @@ def detect_platform(source_file: Optional[str]) -> str:
         return "codex"
     if "/opencode/" in normalized or "\\opencode\\" in str(source_file):
         return "opencode"
+    if "/cursor/" in normalized.lower() or "\\cursor\\" in str(source_file).lower():
+        return "cursor"
     return "unknown"
 
 
@@ -259,6 +262,37 @@ def extract_opencode_items(
     return role, items, is_meta
 
 
+def extract_cursor_items(
+    record: Dict[str, Any],
+) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[bool]]:
+    """Extract items from Cursor chat format."""
+    role = record.get("role")
+    content = record.get("content") or record.get("message")
+    items: List[Dict[str, Any]] = []
+    is_meta = None
+
+    # Cursor format can be string or structured
+    if isinstance(content, str):
+        items.append({"type": "text", "text": content})
+    elif isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict):
+                item_type = item.get("type", "text")
+                if item_type == "text":
+                    items.append({"type": "text", "text": item.get("text", "")})
+                else:
+                    items.append({"type": item_type, "text": str(item)})
+            elif isinstance(item, str):
+                items.append({"type": "text", "text": item})
+    elif isinstance(content, dict):
+        # Sometimes content is a dict with text field
+        text = content.get("text") or content.get("content")
+        if text:
+            items.append({"type": "text", "text": text})
+
+    return role, items, is_meta
+
+
 def summarize_tool_result(value: Any) -> str:
     if value is None:
         return ""
@@ -281,6 +315,48 @@ def load_agent_messages(agent_id: str, base_dir: Path) -> List[Dict[str, Any]]:
     return list(iter_jsonl(agent_path))
 
 
+def load_cursor_chats(db_path: Path) -> List[Dict[str, Any]]:
+    """Load chat history from Cursor's state.vscdb SQLite database."""
+    records = []
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        # Query ItemTable for chat data
+        cursor.execute("""
+            SELECT key, value FROM ItemTable
+            WHERE key IN (
+                'aiService.prompts',
+                'workbench.panel.aichat.view.aichat.chatdata'
+            )
+        """)
+
+        for key, value in cursor.fetchall():
+            if not value:
+                continue
+            try:
+                data = json.loads(value)
+                # Cursor stores chats as array or nested structure
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            item["_source"] = str(db_path)
+                            item["_cursor_key"] = key
+                            records.append(item)
+                elif isinstance(data, dict):
+                    data["_source"] = str(db_path)
+                    data["_cursor_key"] = key
+                    records.append(data)
+            except json.JSONDecodeError:
+                continue
+
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+    return records
+
+
 def collect_files(roots: List[Path]) -> List[Path]:
     files: List[Path] = []
     for root in roots:
@@ -298,6 +374,12 @@ def collect_files(roots: List[Path]) -> List[Path]:
                 files.extend(
                     p for p in root.rglob("msg_*.json")
                 )
+            # Collect Cursor SQLite databases
+            # Cursor stores chats in state.vscdb in workspaceStorage/<hash>/
+            if "cursor" in str(root).lower():
+                files.extend(
+                    p for p in root.rglob("state.vscdb")
+                )
     return sorted(set(files))
 
 
@@ -306,6 +388,9 @@ def load_records(files: List[Path]) -> List[Dict[str, Any]]:
 
     # Parallel file loading with ThreadPoolExecutor
     def load_file(p: Path) -> List[Dict[str, Any]]:
+        # Handle Cursor SQLite databases separately
+        if p.name == "state.vscdb":
+            return load_cursor_chats(p)
         return list(iter_jsonl(p))
 
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -397,6 +482,17 @@ def to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
                     if msg_idx + 1 < len(parts):
                         session_id = shorten_uuid(parts[msg_idx + 1])
             message_id = shorten_uuid(r.get("id"))
+        elif platform == "cursor":
+            role, items, is_meta = extract_cursor_items(r)
+            # Cursor: extract session_id from workspace hash in file path
+            session_id = None
+            if source_file:
+                parts = Path(source_file).parts
+                if "workspaceStorage" in parts:
+                    ws_idx = parts.index("workspaceStorage")
+                    if ws_idx + 1 < len(parts):
+                        session_id = parts[ws_idx + 1][:8]  # Use first 8 chars of workspace hash
+            message_id = shorten_uuid(r.get("id") or r.get("messageId"))
         else:
             msg = r.get("message") or {}
             items = normalize_content(msg.get("content"))
@@ -475,6 +571,7 @@ def main() -> int:
         home / ".claude" / "transcripts",
         home / ".codex" / "sessions",
         home / ".local" / "share" / "opencode" / "project",
+        home / "AppData" / "Roaming" / "Cursor" / "User" / "workspaceStorage",
     ]
     if args.include_history:
         roots.append(home / ".claude" / "history.jsonl")

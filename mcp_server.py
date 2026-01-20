@@ -157,6 +157,7 @@ def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> N
         home / ".claude" / "transcripts",
         home / ".codex" / "sessions",
         home / ".local" / "share" / "opencode" / "project",
+        home / "AppData" / "Roaming" / "Cursor" / "User" / "workspaceStorage",
     ]
     if include_history:
         roots.append(home / ".claude" / "history.jsonl")
