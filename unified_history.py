@@ -303,9 +303,27 @@ def summarize_tool_result(value: Any) -> str:
             value = str(value)
     if not isinstance(value, str):
         value = str(value)
-    lines = value.splitlines()
-    head = "\n".join(lines[:2])
-    return head[:1000]
+    # Limit to 1000 characters
+    if len(value) > 1000:
+        return value[:1000] + "...[truncated]"
+    return value
+
+
+def summarize_tool_args(value: Any) -> str:
+    """Summarize tool arguments to save space."""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        try:
+            value = json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            value = str(value)
+    if not isinstance(value, str):
+        value = str(value)
+    # Limit to 500 characters for args
+    if len(value) > 500:
+        return value[:500] + "...[truncated]"
+    return value
 
 
 def load_agent_messages(agent_id: str, base_dir: Path) -> List[Dict[str, Any]]:
@@ -542,8 +560,8 @@ def to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
                 text=text,
                 index_text=index_text,
                 tool_name=it.get("name"),
-                tool_args=it.get("input"),
-                tool_result=it.get("content"),
+                tool_args=summarize_tool_args(it.get("input")),
+                tool_result=summarize_tool_result(it.get("content")),
                 tool_result_summary=summary,
                 source_file=source_file,
                 raw_json=r,

@@ -254,6 +254,11 @@ def sql_query(conn: sqlite3.Connection, query: str, limit: int) -> Dict[str, Any
     except (TimeoutError, RuntimeError) as exc:
         return {"error": f"Database not ready: {exc}"}
 
+    # Enforce maximum limit of 50 rows to prevent token waste
+    MAX_LIMIT = 50
+    if limit > MAX_LIMIT:
+        limit = MAX_LIMIT
+
     q = query.strip()
     q_norm = _strip_sql_leading_comments(q)
     if not q_norm:
@@ -266,10 +271,27 @@ def sql_query(conn: sqlite3.Connection, query: str, limit: int) -> Dict[str, Any
         exec_q = q.rstrip().rstrip(";")
         if not re.search(r"\blimit\b", q_norm, re.IGNORECASE):
             exec_q = f"{exec_q} limit {limit}"
+        else:
+            # Check if user's LIMIT exceeds MAX_LIMIT
+            limit_match = re.search(r"\blimit\s+(\d+)", q_norm, re.IGNORECASE)
+            if limit_match:
+                user_limit = int(limit_match.group(1))
+                if user_limit > MAX_LIMIT:
+                    return {"error": f"LIMIT exceeds maximum allowed ({MAX_LIMIT}). Please use a smaller LIMIT or add more specific WHERE conditions."}
     try:
         cur = conn.execute(exec_q)
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description] if cur.description else []
+
+        # Additional safety check
+        if len(rows) > MAX_LIMIT:
+            rows = rows[:MAX_LIMIT]
+            return {
+                "columns": cols,
+                "rows": rows,
+                "warning": f"Results truncated to {MAX_LIMIT} rows. Use more specific WHERE conditions to narrow your search."
+            }
+
         return {"columns": cols, "rows": rows}
     except sqlite3.Error as exc:
         return {"error": f"sqlite error: {exc}; query={exec_q}"}
