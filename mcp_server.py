@@ -157,6 +157,120 @@ def get_cache_stats() -> Dict[str, Any]:
     }
 
 
+def get_session_details(conn: sqlite3.Connection, session_id: str) -> Dict[str, Any]:
+    """Get full conversation history for a session."""
+    try:
+        wait_for_db(timeout=5.0)
+    except (TimeoutError, RuntimeError) as exc:
+        return {"error": f"Database not ready: {exc}"}
+
+    try:
+        messages = conn.execute("""
+            SELECT event_id, timestamp, role, text, platform
+            FROM events
+            WHERE session_id = ?
+            ORDER BY timestamp ASC
+            LIMIT 200
+        """, (session_id,)).fetchall()
+
+        if not messages:
+            return {"error": f"Session {session_id} not found"}
+
+        return {
+            "session_id": session_id,
+            "message_count": len(messages),
+            "messages": [
+                {
+                    "event_id": msg[0],
+                    "timestamp": msg[1],
+                    "role": msg[2],
+                    "text": msg[3],
+                    "platform": msg[4]
+                }
+                for msg in messages
+            ]
+        }
+    except sqlite3.Error as exc:
+        return {"error": f"Database error: {exc}"}
+
+
+def get_tool_usage(conn: sqlite3.Connection, days: int = 30) -> Dict[str, Any]:
+    """Get tool usage statistics."""
+    try:
+        wait_for_db(timeout=5.0)
+    except (TimeoutError, RuntimeError) as exc:
+        return {"error": f"Database not ready: {exc}"}
+
+    try:
+        tools = conn.execute(f"""
+            SELECT
+                tool_name,
+                COUNT(*) as usage_count,
+                COUNT(DISTINCT session_id) as session_count,
+                MAX(timestamp) as last_used
+            FROM events_raw
+            WHERE tool_name IS NOT NULL
+            AND datetime(timestamp) >= datetime('now', '-{days} days')
+            GROUP BY tool_name
+            ORDER BY usage_count DESC
+            LIMIT 20
+        """).fetchall()
+
+        return {
+            "days": days,
+            "tool_count": len(tools),
+            "tools": [
+                {
+                    "name": t[0],
+                    "usage_count": t[1],
+                    "session_count": t[2],
+                    "last_used": t[3]
+                }
+                for t in tools
+            ]
+        }
+    except sqlite3.Error as exc:
+        return {"error": f"Database error: {exc}"}
+
+
+def get_platform_stats(conn: sqlite3.Connection, days: int = 30) -> Dict[str, Any]:
+    """Get platform usage statistics."""
+    try:
+        wait_for_db(timeout=5.0)
+    except (TimeoutError, RuntimeError) as exc:
+        return {"error": f"Database not ready: {exc}"}
+
+    try:
+        platforms = conn.execute(f"""
+            SELECT
+                platform,
+                COUNT(*) as event_count,
+                COUNT(DISTINCT session_id) as session_count,
+                MIN(timestamp) as first_seen,
+                MAX(timestamp) as last_seen
+            FROM events
+            WHERE datetime(timestamp) >= datetime('now', '-{days} days')
+            GROUP BY platform
+            ORDER BY event_count DESC
+        """).fetchall()
+
+        return {
+            "days": days,
+            "platforms": [
+                {
+                    "name": p[0],
+                    "event_count": p[1],
+                    "session_count": p[2],
+                    "first_seen": p[3],
+                    "last_seen": p[4]
+                }
+                for p in platforms
+            ]
+        }
+    except sqlite3.Error as exc:
+        return {"error": f"Database error: {exc}"}
+
+
 def get_recent_activity(conn: sqlite3.Connection, days: int = 7) -> Dict[str, Any]:
     """Get structured summary of recent activity."""
     try:
