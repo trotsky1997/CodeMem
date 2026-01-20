@@ -979,6 +979,8 @@ def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> N
               index_text as text,
               session_id,
               turn_id,
+              item_index,
+              line_number,
               source_file,
               platform
             from events_raw
@@ -987,6 +989,8 @@ def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> N
         )
         conn.execute("create index if not exists idx_events_time on events(timestamp)")
         conn.execute("create index if not exists idx_events_role on events(role)")
+        conn.execute("create index if not exists idx_events_session on events(session_id)")
+        conn.execute("create index if not exists idx_events_line on events(session_id, item_index, line_number)")
 
 
 def build_db_background(db_path: Path, include_history: bool, extra_roots: List[Path], md_sessions_dir: Path, export_md: bool) -> None:
@@ -1388,6 +1392,20 @@ def main() -> int:
             },
         },
         {
+            "name": "text.context",
+            "description": "Get context lines around a specific line in a session. Useful for viewing code snippets or conversation context.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session ID (8-char hash)"},
+                    "item_index": {"type": "integer", "description": "Item index within the message"},
+                    "line_number": {"type": "integer", "description": "Line number within the item (0-indexed)"},
+                    "context_lines": {"type": "integer", "default": 3, "description": "Number of lines before and after (default 3)"},
+                },
+                "required": ["session_id", "item_index", "line_number"],
+            },
+        },
+        {
             "name": "text.shell",
             "description": "Run rg/sed/awk against md_sessions with a restricted allowlist.",
             "inputSchema": {
@@ -1748,6 +1766,80 @@ def main() -> int:
                     payload["error"] = {"code": "SEARCH_ERROR", "message": result["error"]}
                 else:
                     payload["meta"] = {"result_count": result["count"], "source": result["source"]}
+                respond(msg_id, payload)
+                continue
+            if name == "text.context":
+                session_id = args.get("session_id", "")
+                item_index = parse_int(args.get("item_index", 0), 0)
+                line_number = parse_int(args.get("line_number", 0), 0)
+                context_lines = parse_int(args.get("context_lines", 3), 3)
+
+                # Clamp context_lines
+                context_lines = max(0, min(context_lines, 20))
+
+                try:
+                    # Query for context lines
+                    cursor = get_conn().cursor()
+                    cursor.execute("""
+                        SELECT line_number, text, role, timestamp
+                        FROM events_raw
+                        WHERE session_id = ?
+                          AND item_index = ?
+                          AND line_number >= ?
+                          AND line_number <= ?
+                        ORDER BY line_number
+                    """, (
+                        session_id,
+                        item_index,
+                        max(0, line_number - context_lines),
+                        line_number + context_lines
+                    ))
+
+                    rows = cursor.fetchall()
+
+                    if not rows:
+                        result = {"error": f"No lines found for session {session_id}, item {item_index}, line {line_number}"}
+                    else:
+                        lines = []
+                        for ln, text, role, ts in rows:
+                            marker = ">>>" if ln == line_number else "   "
+                            lines.append({
+                                "line_number": ln,
+                                "text": text,
+                                "is_target": ln == line_number,
+                                "role": role,
+                                "timestamp": ts
+                            })
+
+                        result = {
+                            "session_id": session_id,
+                            "item_index": item_index,
+                            "target_line": line_number,
+                            "context_lines": context_lines,
+                            "lines": lines
+                        }
+
+                        # Format text output
+                        text_lines = [f"Context for session {session_id}, item {item_index}, line {line_number}:", ""]
+                        for line in lines:
+                            marker = ">>>" if line["is_target"] else "   "
+                            text_lines.append(f"{marker} {line['line_number']:3d} | {line['text']}")
+                        text = "\n".join(text_lines)
+
+                except Exception as e:
+                    result = {"error": str(e)}
+                    text = str(e)
+
+                payload = {
+                    "content": [{"type": "text", "text": text if "error" not in result else result["error"]}],
+                    "data": result,
+                    "ok": "error" not in result,
+                }
+                if "error" in result:
+                    payload["isError"] = True
+                    payload["error"] = {"code": "CONTEXT_ERROR", "message": result["error"]}
+                else:
+                    payload["meta"] = {"line_count": len(result["lines"])}
                 respond(msg_id, payload)
                 continue
             if name == "text.shell":

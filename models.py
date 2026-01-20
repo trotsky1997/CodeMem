@@ -18,6 +18,7 @@ class UnifiedEvent(BaseModel):
     message_id: Optional[str] = None
     turn_id: Optional[str] = None
     item_index: Optional[int] = None
+    line_number: Optional[int] = None  # Line number within the item (0-indexed)
 
     timestamp: Optional[datetime] = None
     role: Optional[str] = None
@@ -40,6 +41,7 @@ class UnifiedEventRow(BaseModel):
     message_id: Optional[str] = None
     turn_id: Optional[str] = None
     item_index: Optional[int] = None
+    line_number: Optional[int] = None  # Line number within the item (0-indexed)
     timestamp: Optional[str] = None
     role: Optional[str] = None
     is_meta: Optional[bool] = None

@@ -542,31 +542,67 @@ def to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
                 summary = summarize_tool_result(it.get("content"))
             text = it.get("text")
             index_text = text if item_type == "text" else summary
-            row = UnifiedEventRow(
-                platform=platform,
-                session_id=session_id,
-                message_id=message_id,
-                turn_id=turn_id,
-                item_index=idx,
-                timestamp=r.get("timestamp"),
-                role=role,
-                is_meta=is_meta,
-                agent_id=r.get("agentId"),
-                is_indexable=(
-                    role in ("user", "assistant")
-                    and item_type in ("text", "tool_result")
-                ),
-                item_type=item_type,
-                text=text,
-                index_text=index_text,
-                tool_name=it.get("name"),
-                tool_args=summarize_tool_args(it.get("input")),
-                tool_result=summarize_tool_result(it.get("content")),
-                tool_result_summary=summary,
-                source_file=source_file,
-                raw_json=r,
-            )
-            rows.append(row.model_dump())
+
+            # Split text into lines if it's a text item
+            if text and item_type == "text" and "\n" in text:
+                lines = text.split("\n")
+                for line_no, line in enumerate(lines):
+                    # Create a row for each line
+                    row = UnifiedEventRow(
+                        platform=platform,
+                        session_id=session_id,
+                        message_id=message_id,
+                        turn_id=turn_id,
+                        item_index=idx,
+                        line_number=line_no,
+                        timestamp=r.get("timestamp"),
+                        role=role,
+                        is_meta=is_meta,
+                        agent_id=r.get("agentId"),
+                        is_indexable=(
+                            role in ("user", "assistant")
+                            and item_type in ("text", "tool_result")
+                            and line.strip()  # Only index non-empty lines
+                        ),
+                        item_type=item_type,
+                        text=line,
+                        index_text=line if line.strip() else None,
+                        tool_name=it.get("name"),
+                        tool_args=None,  # Only store on first line
+                        tool_result=None,  # Only store on first line
+                        tool_result_summary=None,  # Only store on first line
+                        source_file=source_file,
+                        raw_json=r if line_no == 0 else {},  # Only store raw_json on first line
+                    )
+                    rows.append(row.model_dump())
+            else:
+                # Single line or non-text item
+                row = UnifiedEventRow(
+                    platform=platform,
+                    session_id=session_id,
+                    message_id=message_id,
+                    turn_id=turn_id,
+                    item_index=idx,
+                    line_number=0,  # Single line items have line_number=0
+                    timestamp=r.get("timestamp"),
+                    role=role,
+                    is_meta=is_meta,
+                    agent_id=r.get("agentId"),
+                    is_indexable=(
+                        role in ("user", "assistant")
+                        and item_type in ("text", "tool_result")
+                    ),
+                    item_type=item_type,
+                    text=text,
+                    index_text=index_text,
+                    tool_name=it.get("name"),
+                    tool_args=summarize_tool_args(it.get("input")),
+                    tool_result=summarize_tool_result(it.get("content")),
+                    tool_result_summary=summary,
+                    source_file=source_file,
+                    raw_json=r,
+                )
+                rows.append(row.model_dump())
     if not rows:
         if hasattr(UnifiedEventRow, "model_fields"):
             cols = list(UnifiedEventRow.model_fields.keys())
