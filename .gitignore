@@ -45,7 +45,7 @@ md_sessions/
 
 # Temporary files
 tmp*/
-tmpclaude-*/
+tmpclaude-*
 
 # Local settings
 .claude/settings.local.json
