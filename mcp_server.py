@@ -409,13 +409,17 @@ def main() -> int:
     parser.add_argument("--include-history", action="store_true")
     parser.add_argument("--root", action="append", default=[])
     parser.add_argument("--no-export-md-sessions", action="store_true")
+    parser.add_argument("--rebuild", action="store_true", help="Force rebuild database even if it exists")
     args = parser.parse_args()
 
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-    build_db(db_path, args.include_history, [Path(p) for p in args.root])
+
+    # Only rebuild if database doesn't exist or --rebuild flag is set
+    if not db_path.exists() or args.rebuild:
+        if db_path.exists():
+            db_path.unlink()
+        build_db(db_path, args.include_history, [Path(p) for p in args.root])
 
     conn = sqlite3.connect(str(db_path))
     if not args.no_export_md_sessions:
