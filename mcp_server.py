@@ -45,10 +45,15 @@ _db_build_lock = threading.Lock()
 _db_ready = threading.Event()
 _db_build_error: str | None = None
 
-# Global BM25 index
+# Global BM25 index (SQL-based)
 _bm25_index = None
 _bm25_docs = []
 _bm25_metadata = []
+
+# Global BM25 index (Markdown-based)
+_bm25_md_index = None
+_bm25_md_docs = []
+_bm25_md_metadata = []
 
 # Query cache with LRU and TTL
 _query_cache: Dict[str, Tuple[Any, float]] = {}
@@ -717,12 +722,79 @@ def build_bm25_index(db_path: Path) -> None:
         pass
 
 
-def bm25_search(query: str, limit: int = 20) -> Dict[str, Any]:
-    """Search using BM25 ranking."""
+def build_bm25_md_index(md_sessions_dir: Path) -> None:
+    """Build BM25 index from Markdown session files."""
+    global _bm25_md_index, _bm25_md_docs, _bm25_md_metadata
+
+    try:
+        if not md_sessions_dir.exists():
+            return
+
+        md_files = list(md_sessions_dir.glob("*.md"))
+        if not md_files:
+            return
+
+        # Prepare documents for BM25
+        _bm25_md_docs = []
+        _bm25_md_metadata = []
+
+        for md_file in md_files:
+            try:
+                content = md_file.read_text(encoding="utf-8")
+
+                # Extract session_id from filename
+                session_id = md_file.stem
+
+                # Parse markdown to extract messages
+                # Split by message headers (### [role] timestamp)
+                import re
+                messages = re.split(r'\n### \[(.*?)\] (.*?)\n', content)
+
+                # Process messages (skip header, process in groups of 3: role, timestamp, content)
+                for i in range(1, len(messages), 3):
+                    if i + 2 < len(messages):
+                        role = messages[i]
+                        timestamp = messages[i + 1]
+                        text = messages[i + 2].strip()
+
+                        if text:
+                            # Smart tokenization
+                            tokens = smart_tokenize(text)
+                            _bm25_md_docs.append(tokens)
+                            _bm25_md_metadata.append({
+                                "session_id": session_id,
+                                "timestamp": timestamp,
+                                "role": role,
+                                "text": text,
+                                "source": "markdown",
+                                "file": md_file.name
+                            })
+            except Exception:
+                # Skip files that fail to parse
+                continue
+
+        if _bm25_md_docs:
+            # Build BM25 index
+            _bm25_md_index = BM25Okapi(_bm25_md_docs)
+
+    except Exception:
+        # Silently fail if index building fails
+        pass
+
+
+def bm25_search(query: str, limit: int = 20, source: str = "sql") -> Dict[str, Any]:
+    """Search using BM25 ranking.
+
+    Args:
+        query: Search query
+        limit: Maximum number of results
+        source: Data source - "sql" (default), "markdown", or "both"
+    """
     global _bm25_index, _bm25_docs, _bm25_metadata
+    global _bm25_md_index, _bm25_md_docs, _bm25_md_metadata
 
     # Check cache first
-    key = cache_key("bm25", query, limit=limit)
+    key = cache_key("bm25", query, limit=limit, source=source)
     cached = get_from_cache(key)
     if cached is not None:
         return cached
@@ -733,14 +805,6 @@ def bm25_search(query: str, limit: int = 20) -> Dict[str, Any]:
     except (TimeoutError, RuntimeError) as exc:
         return {"error": f"Database not ready: {exc}"}
 
-    # Build index if not exists
-    if _bm25_index is None:
-        db_path = Path.home() / ".codemem" / "codemem.sqlite"
-        build_bm25_index(db_path)
-
-        if _bm25_index is None:
-            return {"error": "BM25 index not available. Database may be empty."}
-
     # Enforce maximum limit
     MAX_LIMIT = 50
     if limit > MAX_LIMIT:
@@ -748,6 +812,78 @@ def bm25_search(query: str, limit: int = 20) -> Dict[str, Any]:
 
     # Smart tokenization for query (supports Chinese and English)
     query_tokens = smart_tokenize(query)
+
+    results = []
+
+    # Search SQL index
+    if source in ("sql", "both"):
+        # Build SQL index if not exists
+        if _bm25_index is None:
+            db_path = Path.home() / ".codemem" / "codemem.sqlite"
+            build_bm25_index(db_path)
+
+        if _bm25_index is not None:
+            # Get BM25 scores
+            scores = _bm25_index.get_scores(query_tokens)
+
+            # Get top results
+            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:limit]
+
+            for idx in top_indices:
+                if scores[idx] > 0:  # Only include results with positive scores
+                    meta = _bm25_metadata[idx]
+                    results.append({
+                        "event_id": meta.get("event_id"),
+                        "timestamp": meta["timestamp"],
+                        "role": meta["role"],
+                        "text": meta["text"][:200] + "..." if len(meta["text"]) > 200 else meta["text"],
+                        "session_id": meta["session_id"],
+                        "platform": meta["platform"],
+                        "score": float(scores[idx]),
+                        "source": "sql"
+                    })
+
+    # Search Markdown index
+    if source in ("markdown", "both"):
+        # Build Markdown index if not exists
+        if _bm25_md_index is None:
+            build_bm25_md_index(MD_SESSIONS_DIR)
+
+        if _bm25_md_index is not None:
+            # Get BM25 scores
+            md_scores = _bm25_md_index.get_scores(query_tokens)
+
+            # Get top results
+            md_top_indices = sorted(range(len(md_scores)), key=lambda i: md_scores[i], reverse=True)[:limit]
+
+            for idx in md_top_indices:
+                if md_scores[idx] > 0:  # Only include results with positive scores
+                    meta = _bm25_md_metadata[idx]
+                    results.append({
+                        "timestamp": meta["timestamp"],
+                        "role": meta["role"],
+                        "text": meta["text"][:200] + "..." if len(meta["text"]) > 200 else meta["text"],
+                        "session_id": meta["session_id"],
+                        "file": meta["file"],
+                        "score": float(md_scores[idx]),
+                        "source": "markdown"
+                    })
+
+    # Sort combined results by score
+    if source == "both":
+        results = sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
+
+    result = {
+        "query": query,
+        "count": len(results),
+        "results": results,
+        "source": source
+    }
+
+    # Cache the result
+    put_to_cache(key, result)
+
+    return result
 
     # Get BM25 scores
     scores = _bm25_index.get_scores(query_tokens)
@@ -1183,6 +1319,12 @@ def main() -> int:
                 "properties": {
                     "query": {"type": "string", "description": "Natural language search query (e.g., 'Python debugging tips')"},
                     "limit": {"type": "integer", "default": 20, "description": "Max results to return (max 50)"},
+                    "source": {
+                        "type": "string",
+                        "enum": ["sql", "markdown", "both"],
+                        "default": "sql",
+                        "description": "Data source: 'sql' (structured DB, default), 'markdown' (session files), or 'both' (combined search)"
+                    }
                 },
                 "required": ["query"],
             },
@@ -1572,16 +1714,27 @@ def main() -> int:
             if name == "semantic.search":
                 query = args.get("query", "")
                 limit = parse_int(args.get("limit", 20), 20)
-                result = bm25_search(query, limit)
+                source = args.get("source", "sql")
+
+                # Validate source parameter
+                if source not in ("sql", "markdown", "both"):
+                    source = "sql"
+
+                result = bm25_search(query, limit, source)
 
                 # Format results as text
                 if "error" in result:
                     text = result["error"]
                 else:
-                    lines = [f"Found {result['count']} results for: '{result['query']}'", ""]
+                    lines = [f"Found {result['count']} results for: '{result['query']}' (source: {result['source']})", ""]
                     for i, r in enumerate(result.get("results", [])[:10], 1):
                         lines.append(f"{i}. [{r['role']}] {r['text']}")
-                        lines.append(f"   Session: {r['session_id']} | Platform: {r['platform']} | Score: {r['score']:.2f}")
+
+                        # Format metadata based on source
+                        if r.get('source') == 'markdown':
+                            lines.append(f"   Session: {r['session_id']} | File: {r.get('file', 'N/A')} | Score: {r['score']:.2f} | Source: markdown")
+                        else:
+                            lines.append(f"   Session: {r['session_id']} | Platform: {r.get('platform', 'N/A')} | Score: {r['score']:.2f} | Source: sql")
                         lines.append("")
                     text = "\n".join(lines)
 
@@ -1594,7 +1747,7 @@ def main() -> int:
                     payload["isError"] = True
                     payload["error"] = {"code": "SEARCH_ERROR", "message": result["error"]}
                 else:
-                    payload["meta"] = {"result_count": result["count"]}
+                    payload["meta"] = {"result_count": result["count"], "source": result["source"]}
                 respond(msg_id, payload)
                 continue
             if name == "text.shell":
