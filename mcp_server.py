@@ -13,6 +13,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -27,6 +28,11 @@ from export_sessions_md import export_sessions
 MD_SESSIONS_DIR = Path.home() / ".codemem" / "md_sessions"
 SESSIONS_INDEX_URI = "codemem://sessions/index"
 SESSIONS_URI_PREFIX = "codemem://sessions/"
+
+# Global state for background database build
+_db_build_lock = threading.Lock()
+_db_ready = threading.Event()
+_db_build_error: str | None = None
 
 RESOURCES = [
     {
@@ -193,7 +199,37 @@ def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> N
         conn.execute("create index if not exists idx_events_role on events(role)")
 
 
+def build_db_background(db_path: Path, include_history: bool, extra_roots: List[Path], md_sessions_dir: Path, export_md: bool) -> None:
+    """Build database in background thread."""
+    global _db_build_error
+    try:
+        build_db(db_path, include_history, extra_roots)
+        if export_md:
+            try:
+                export_sessions(db_path, md_sessions_dir, include_meta=False)
+            except OSError:
+                pass
+        _db_ready.set()
+    except Exception as exc:
+        _db_build_error = str(exc)
+        _db_ready.set()
+
+
+def wait_for_db(timeout: float = 60.0) -> None:
+    """Wait for database to be ready, raise error if build failed."""
+    if not _db_ready.wait(timeout=timeout):
+        raise TimeoutError("Database build timed out")
+    if _db_build_error:
+        raise RuntimeError(f"Database build failed: {_db_build_error}")
+
+
 def sql_query(conn: sqlite3.Connection, query: str, limit: int) -> Dict[str, Any]:
+    # Wait for database to be ready before executing queries
+    try:
+        wait_for_db(timeout=120.0)
+    except (TimeoutError, RuntimeError) as exc:
+        return {"error": f"Database not ready: {exc}"}
+
     q = query.strip()
     q_norm = _strip_sql_leading_comments(q)
     if not q_norm:
@@ -404,6 +440,7 @@ def respond_error(msg_id: Any, code: int, message: str) -> None:
 
 
 def main() -> int:
+    global _db_build_error
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default=str(Path.home() / ".codemem" / "codemem.sqlite"))
     parser.add_argument("--include-history", action="store_true")
@@ -415,18 +452,24 @@ def main() -> int:
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Only rebuild if database doesn't exist or --rebuild flag is set
-    if not db_path.exists() or args.rebuild:
+    # Check if database needs to be built
+    needs_build = not db_path.exists() or args.rebuild
+
+    if needs_build:
         if db_path.exists():
             db_path.unlink()
-        build_db(db_path, args.include_history, [Path(p) for p in args.root])
+        # Start background build thread
+        build_thread = threading.Thread(
+            target=build_db_background,
+            args=(db_path, args.include_history, [Path(p) for p in args.root], MD_SESSIONS_DIR, not args.no_export_md_sessions),
+            daemon=True
+        )
+        build_thread.start()
+    else:
+        # Database exists, mark as ready immediately
+        _db_ready.set()
 
     conn = sqlite3.connect(str(db_path))
-    if not args.no_export_md_sessions:
-        try:
-            export_sessions(db_path, MD_SESSIONS_DIR, include_meta=False)
-        except OSError:
-            pass
     tools = [
         {
             "name": "sql.query",
