@@ -340,11 +340,37 @@ async def build_db_async(db_path: Path, include_history: bool, extra_roots: List
         # Insert into database (async)
         conn = await aiosqlite.connect(str(db_path))
 
+        # Create events_raw table
+        await conn.execute("DROP TABLE IF EXISTS events_raw")
+        await conn.execute("""
+            CREATE TABLE events_raw (
+                platform TEXT,
+                session_id TEXT,
+                message_id TEXT,
+                turn_id TEXT,
+                item_index INTEGER,
+                line_number INTEGER,
+                timestamp TEXT,
+                role TEXT,
+                is_meta INTEGER,
+                agent_id TEXT,
+                is_indexable INTEGER,
+                item_type TEXT,
+                text TEXT,
+                index_text TEXT,
+                tool_name TEXT,
+                tool_args TEXT,
+                tool_result TEXT,
+                tool_result_summary TEXT,
+                source_file TEXT,
+                raw_json TEXT
+            )
+        """)
+
         if rows:
             columns = list(rows[0].keys())
             placeholders = ",".join(["?"] * len(columns))
 
-            await conn.execute("DROP TABLE IF EXISTS events_raw")
             await conn.executemany(
                 f"INSERT INTO events_raw ({','.join(columns)}) VALUES ({placeholders})",
                 [tuple(row[col] for col in columns) for row in rows]
