@@ -1,5 +1,122 @@
 # 更新日志
 
+## [1.2.0] - 2026-01-20 - Simplification: Back to Basics
+
+### 🎉 重大更新
+
+**简化为 3 个核心工具**
+
+v1.2.0 将 CodeMem 简化回最基础的 3 个工具，移除了所有高级抽象层。
+
+### 理念转变
+
+从"智能记忆助手"回归到"简单工具集"：
+- ❌ 移除复杂的自然语言处理
+- ❌ 移除意图识别和查询重写
+- ❌ 移除对话上下文管理
+- ❌ 移除模式分析和聚类
+- ❌ 移除 CTR 排序系统
+- ✅ 保留核心搜索和查询功能
+
+### 移除的工具
+
+- `memory.query` - 自然语言查询接口
+- `memory.insights` - 用户行为洞察
+- `memory.clusters` - 模式聚类分析
+
+### 保留的工具 (3)
+
+1. **semantic.search** - BM25 语义搜索
+   - 搜索对话历史
+   - 支持中英文分词
+   - 双索引架构（SQL + Markdown）
+
+2. **sql.query** - SQL 查询
+   - 直接执行 SELECT 查询
+   - 灵活的数据分析
+   - 只读安全限制
+
+3. **regex.search** - 正则表达式搜索
+   - 精确模式匹配
+   - 代码片段搜索
+   - Python re 语法支持
+
+### 移除的模块
+
+- `intent_recognition.py` - 意图识别
+- `nl_formatter.py` - 自然语言格式化
+- `context_manager.py` - 对话上下文管理
+- `query_rewriter.py` - 查询重写
+- `pattern_analyzer.py` - 模式分析
+- `pattern_clusterer.py` - 模式聚类
+- `conversation_rank.py` - ConversationRank 算法
+- `distance_trainer.py` - 距离训练数据生成
+- `feature_extractor.py` - 特征提取
+- `ctr_model.py` - CTR 预估模型
+- `search_ranker.py` - 搜索排序
+- `pattern_integration.py` - Pattern 集成
+
+### 代码变化
+
+- **删除**: ~2000 行复杂逻辑
+- **保留**: ~500 行核心功能
+- **净减少**: 75% 代码量
+
+### 优势
+
+1. **更简单** - 3 个直接工具，易于理解
+2. **更灵活** - 用户可以基于基础工具构建自己的抽象
+3. **更易维护** - 减少复杂的 NLP 和 ML 逻辑
+4. **更专注** - 聚焦核心功能：搜索和查询
+5. **更快** - 移除了所有额外的处理层
+
+### 向后兼容
+
+⚠️ **不兼容 v1.1.0**
+- 移除了 `memory.query`、`memory.insights`、`memory.clusters` 工具
+- 如需这些功能，请继续使用 v1.1.0
+
+✅ **兼容 v0.1.x**
+- 保留了所有基础工具
+- `semantic.search` 和 `sql.query` 功能不变
+
+### 迁移指南
+
+如果你在使用 v1.1.0 的高级功能：
+
+**从 `memory.query` 迁移到 `semantic.search`**:
+```python
+# 旧方式 (v1.1.0)
+result = await memory_query("我之前讨论过 Python 异步吗？")
+
+# 新方式 (v1.2.0)
+result = await semantic_search("Python 异步", top_k=20, source="both")
+```
+
+**从 `memory.insights` 迁移到 `sql.query`**:
+```python
+# 旧方式 (v1.1.0)
+insights = await memory_insights(days=7)
+
+# 新方式 (v1.2.0)
+result = await sql_query("""
+    SELECT session_id, COUNT(*) as count, MAX(timestamp) as last_seen
+    FROM events
+    WHERE timestamp >= datetime('now', '-7 days')
+    GROUP BY session_id
+    ORDER BY last_seen DESC
+""")
+```
+
+### 设计哲学
+
+v1.2.0 回归 Unix 哲学：
+- **做一件事，做好它** - 每个工具专注单一功能
+- **组合优于抽象** - 用户可以组合基础工具
+- **简单优于复杂** - 移除不必要的抽象层
+
+---
+
 ## [1.1.0] - 2026-01-20 - Phase 6.1: CTR-Based Search Ranking
 
 ### 🎉 重大更新
