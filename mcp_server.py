@@ -155,22 +155,34 @@ def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> N
 
     # Platform-specific paths
     if sys.platform == "win32":
+        # Windows paths
         cursor_path = home / "AppData" / "Roaming" / "Cursor" / "User"
+        opencode_path = home / "AppData" / "Local" / "opencode" / "project"
+        claude_base = home / "AppData" / "Roaming" / ".claude"
+        codex_base = home / "AppData" / "Roaming" / ".codex"
     elif sys.platform == "darwin":
+        # macOS paths
         cursor_path = home / "Library" / "Application Support" / "Cursor" / "User"
-    else:  # Linux
+        opencode_path = home / "Library" / "Application Support" / "opencode" / "project"
+        claude_base = home / ".claude"
+        codex_base = home / ".codex"
+    else:
+        # Linux paths
         cursor_path = home / ".config" / "Cursor" / "User"
+        opencode_path = home / ".local" / "share" / "opencode" / "project"
+        claude_base = home / ".claude"
+        codex_base = home / ".codex"
 
     roots = [
-        home / ".claude" / "projects",
-        home / ".claude" / "transcripts",
-        home / ".codex" / "sessions",
-        home / ".local" / "share" / "opencode" / "project",
+        claude_base / "projects",
+        claude_base / "transcripts",
+        codex_base / "sessions",
+        opencode_path,
         cursor_path / "workspaceStorage",
         cursor_path / "globalStorage",
     ]
     if include_history:
-        roots.append(home / ".claude" / "history.jsonl")
+        roots.append(claude_base / "history.jsonl")
     roots.extend(extra_roots)
 
     files = collect_files(roots)
