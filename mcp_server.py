@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from rank_bm25 import BM25Okapi
-import jieba
+import tiktoken
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -29,8 +29,11 @@ from unified_history import collect_files, load_records, to_df
 from export_sessions_md import export_sessions
 
 
-# Disable jieba logging
-jieba.setLogLevel(jieba.logging.INFO)
+# Initialize tiktoken encoder (using cl100k_base for GPT-4/GPT-3.5-turbo)
+try:
+    _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _tiktoken_encoder = None
 
 
 MD_SESSIONS_DIR = Path.home() / ".codemem" / "md_sessions"
@@ -83,23 +86,23 @@ RESOURCES = [
 
 
 def smart_tokenize(text: str) -> List[str]:
-    """Smart tokenization supporting both English and Chinese."""
+    """Smart tokenization using tiktoken (supports Chinese and English)."""
     if not text:
         return []
 
-    # Check if text contains Chinese characters
-    has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
+    # Use tiktoken if available
+    if _tiktoken_encoder is not None:
+        try:
+            # Encode to token IDs, then decode each token back to text
+            token_ids = _tiktoken_encoder.encode(text.lower())
+            # Convert token IDs to strings for BM25
+            tokens = [str(tid) for tid in token_ids]
+            return tokens
+        except Exception:
+            pass
 
-    if has_chinese:
-        # Use jieba for Chinese text
-        tokens = list(jieba.cut_for_search(text.lower()))
-        # Filter out single-character tokens and punctuation
-        tokens = [t for t in tokens if len(t) > 1 or t.isalnum()]
-    else:
-        # Simple split for English
-        tokens = text.lower().split()
-
-    return tokens
+    # Fallback to simple split
+    return text.lower().split()
 
 
 def cache_key(prefix: str, query: str, **kwargs) -> str:
