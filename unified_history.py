@@ -162,7 +162,8 @@ def extract_claude_items(
                         if ctype == "text":
                             items.append({"type": "text", "text": c.get("text")})
                         elif ctype == "thinking":
-                            items.append({"type": "thinking", "text": c.get("thinking")})
+                            # Store thinking text in 'content' field to avoid confusion with 'text'
+                            items.append({"type": "thinking", "content": c.get("thinking")})
                         elif ctype == "tool_use":
                             items.append({
                                 "type": "tool_use",
@@ -181,6 +182,11 @@ def extract_claude_items(
         summary_text = record.get("summary", "")
         if summary_text:
             items.append({"type": "text", "text": summary_text})
+    elif rtype == "system":
+        # System messages - mark as meta, no content to index
+        role = "system"
+        is_meta = True
+        # Don't add any items - these are metadata records
 
     return role, items, is_meta
 
@@ -595,13 +601,47 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 lines = text.split("\n")
                 for line_no, line in enumerate(lines):
                     # Create a row for each line
+                    try:
+                        row = UnifiedEventRow(
+                            platform=platform,
+                            session_id=session_id,
+                            message_id=message_id,
+                            turn_id=turn_id,
+                            item_index=idx,
+                            line_number=line_no,
+                            timestamp=r.get("timestamp"),
+                            role=role,
+                            is_meta=is_meta,
+                            agent_id=r.get("agentId"),
+                            is_indexable=(
+                                role in ("user", "assistant")
+                                and item_type in ("text", "tool_result")
+                                and line.strip()  # Only index non-empty lines
+                            ),
+                            item_type=item_type,
+                            text=line,
+                            index_text=line if line.strip() else None,
+                            tool_name=it.get("name"),
+                            tool_args=None,  # Only store on first line
+                            tool_result=None,  # Only store on first line
+                            tool_result_summary=None,  # Only store on first line
+                            source_file=source_file,
+                            raw_json=r if line_no == 0 else {},  # Only store raw_json on first line
+                        )
+                        rows.append(row.model_dump())
+                    except Exception:
+                        # Skip problematic records
+                        pass
+            else:
+                # Single line or non-text item
+                try:
                     row = UnifiedEventRow(
                         platform=platform,
                         session_id=session_id,
                         message_id=message_id,
                         turn_id=turn_id,
                         item_index=idx,
-                        line_number=line_no,
+                        line_number=0,  # Single line items have line_number=0
                         timestamp=r.get("timestamp"),
                         role=role,
                         is_meta=is_meta,
@@ -609,47 +649,21 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         is_indexable=(
                             role in ("user", "assistant")
                             and item_type in ("text", "tool_result")
-                            and line.strip()  # Only index non-empty lines
                         ),
                         item_type=item_type,
-                        text=line,
-                        index_text=line if line.strip() else None,
+                        text=text,
+                        index_text=index_text,
                         tool_name=it.get("name"),
-                        tool_args=None,  # Only store on first line
-                        tool_result=None,  # Only store on first line
-                        tool_result_summary=None,  # Only store on first line
+                        tool_args=summarize_tool_args(it.get("input")),
+                        tool_result=summarize_tool_result(it.get("content")),
+                        tool_result_summary=summary,
                         source_file=source_file,
-                        raw_json=r if line_no == 0 else {},  # Only store raw_json on first line
+                        raw_json=r
                     )
                     rows.append(row.model_dump())
-            else:
-                # Single line or non-text item
-                row = UnifiedEventRow(
-                    platform=platform,
-                    session_id=session_id,
-                    message_id=message_id,
-                    turn_id=turn_id,
-                    item_index=idx,
-                    line_number=0,  # Single line items have line_number=0
-                    timestamp=r.get("timestamp"),
-                    role=role,
-                    is_meta=is_meta,
-                    agent_id=r.get("agentId"),
-                    is_indexable=(
-                        role in ("user", "assistant")
-                        and item_type in ("text", "tool_result")
-                    ),
-                    item_type=item_type,
-                    text=text,
-                    index_text=index_text,
-                    tool_name=it.get("name"),
-                    tool_args=summarize_tool_args(it.get("input")),
-                    tool_result=summarize_tool_result(it.get("content")),
-                    tool_result_summary=summary,
-                    source_file=source_file,
-                    raw_json=r,
-                )
-                rows.append(row.model_dump())
+                except Exception:
+                    # Skip problematic records
+                    pass
     return rows
 
 
