@@ -1,0 +1,3 @@
+[tool.uv]
+cache-dir = "/Users/zdzd/CodeMem/.uv-cache"
+no-env-file = true
