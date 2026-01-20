@@ -34,7 +34,29 @@ class LoadStats:
 
 
 def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    """Load JSON or JSONL files. Single JSON files are yielded as-is."""
     with path.open("r", encoding="utf-8") as f:
+        # Check if it's a single JSON file (OpenCode msg_*.json)
+        if path.suffix == ".json":
+            try:
+                obj = json.load(f)
+                if isinstance(obj, dict):
+                    obj["_source"] = str(path)
+                    yield obj
+                elif isinstance(obj, list):
+                    for item in obj:
+                        if isinstance(item, dict):
+                            item["_source"] = str(path)
+                        yield item
+            except json.JSONDecodeError:
+                yield {
+                    "_parse_error": True,
+                    "_raw": f.read(),
+                    "_source": str(path),
+                }
+            return
+
+        # JSONL format (one JSON per line)
         for line_no, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -113,6 +135,8 @@ def detect_platform(source_file: Optional[str]) -> str:
         return "claude"
     if "/.codex/" in normalized:
         return "codex"
+    if "/opencode/" in normalized or "\\opencode\\" in str(source_file):
+        return "opencode"
     return "unknown"
 
 
@@ -196,6 +220,45 @@ def extract_codex_items(
     return role, items, is_meta
 
 
+def extract_opencode_items(
+    record: Dict[str, Any],
+) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[bool]]:
+    """Extract items from OpenCode message format."""
+    role = record.get("role")
+    content = record.get("content")
+    items: List[Dict[str, Any]] = []
+    is_meta = None
+
+    # OpenCode message format: {role, content: [{type, text/...}]}
+    if isinstance(content, str):
+        items.append({"type": "text", "text": content})
+    elif isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type", "text")
+
+            if item_type == "text":
+                items.append({"type": "text", "text": item.get("text", "")})
+            elif item_type == "tool_use":
+                items.append({
+                    "type": "tool_use",
+                    "name": item.get("name"),
+                    "input": item.get("input"),
+                })
+            elif item_type == "tool_result":
+                items.append({
+                    "type": "tool_result",
+                    "content": item.get("content"),
+                })
+            elif item_type == "image":
+                items.append({"type": "image", "text": item.get("source", {}).get("data", "")})
+            else:
+                items.append({"type": item_type, "text": str(item)})
+
+    return role, items, is_meta
+
+
 def summarize_tool_result(value: Any) -> str:
     if value is None:
         return ""
@@ -221,13 +284,20 @@ def load_agent_messages(agent_id: str, base_dir: Path) -> List[Dict[str, Any]]:
 def collect_files(roots: List[Path]) -> List[Path]:
     files: List[Path] = []
     for root in roots:
-        if root.is_file() and root.suffix == ".jsonl":
+        if root.is_file() and root.suffix in (".jsonl", ".json"):
             files.append(root)
             continue
         if root.is_dir():
+            # Collect JSONL files (Claude, Codex)
             files.extend(
                 p for p in root.rglob("*.jsonl") if not p.name.startswith("agent-")
             )
+            # Collect JSON files (OpenCode messages)
+            # OpenCode stores messages as msg_*.json in storage/message/<session-id>/
+            if "opencode" in str(root).lower():
+                files.extend(
+                    p for p in root.rglob("msg_*.json")
+                )
     return sorted(set(files))
 
 
@@ -316,6 +386,17 @@ def to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
             )
             session_id = shorten_uuid(session_id)
             message_id = shorten_uuid(msg.get("id") or r.get("uuid"))
+        elif platform == "opencode":
+            role, items, is_meta = extract_opencode_items(r)
+            # OpenCode: extract session_id from file path (storage/message/<session-id>/msg_*.json)
+            session_id = None
+            if source_file:
+                parts = Path(source_file).parts
+                if "message" in parts:
+                    msg_idx = parts.index("message")
+                    if msg_idx + 1 < len(parts):
+                        session_id = shorten_uuid(parts[msg_idx + 1])
+            message_id = shorten_uuid(r.get("id"))
         else:
             msg = r.get("message") or {}
             items = normalize_content(msg.get("content"))
@@ -393,6 +474,7 @@ def main() -> int:
         home / ".claude" / "projects",
         home / ".claude" / "transcripts",
         home / ".codex" / "sessions",
+        home / ".local" / "share" / "opencode" / "project",
     ]
     if args.include_history:
         roots.append(home / ".claude" / "history.jsonl")
