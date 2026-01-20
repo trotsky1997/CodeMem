@@ -9,8 +9,14 @@ dependencies = [
   "tiktoken>=0.5.0",
 ]
 
+[project.optional-dependencies]
+async = [
+  "aiosqlite>=0.22.0",
+]
+
 [project.scripts]
 codemem-mcp = "mcp_server:main"
+codemem-mcp-async = "mcp_server_async:main"
 
 [build-system]
 requires = ["setuptools>=61", "wheel"]
