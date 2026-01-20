@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
+from rank_bm25 import BM25Okapi
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -33,6 +34,11 @@ SESSIONS_URI_PREFIX = "codemem://sessions/"
 _db_build_lock = threading.Lock()
 _db_ready = threading.Event()
 _db_build_error: str | None = None
+
+# Global BM25 index
+_bm25_index = None
+_bm25_docs = []
+_bm25_metadata = []
 
 RESOURCES = [
     {
@@ -394,6 +400,107 @@ def run_text_shell(cmd: str, args: Any, paths: Any) -> Dict[str, Any]:
     }
 
 
+def build_bm25_index(db_path: Path) -> None:
+    """Build BM25 index from events table."""
+    global _bm25_index, _bm25_docs, _bm25_metadata
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        # Fetch all searchable events
+        cursor.execute("""
+            SELECT event_id, timestamp, role, text, session_id, platform
+            FROM events
+            WHERE text IS NOT NULL AND text != ''
+            ORDER BY timestamp DESC
+            LIMIT 10000
+        """)
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return
+
+        # Prepare documents for BM25
+        _bm25_docs = []
+        _bm25_metadata = []
+
+        for event_id, timestamp, role, text, session_id, platform in rows:
+            # Simple tokenization (split by whitespace and lowercase)
+            tokens = text.lower().split()
+            _bm25_docs.append(tokens)
+            _bm25_metadata.append({
+                "event_id": event_id,
+                "timestamp": timestamp,
+                "role": role,
+                "text": text,
+                "session_id": session_id,
+                "platform": platform
+            })
+
+        # Build BM25 index
+        _bm25_index = BM25Okapi(_bm25_docs)
+
+    except Exception:
+        # Silently fail if index building fails
+        pass
+
+
+def bm25_search(query: str, limit: int = 20) -> Dict[str, Any]:
+    """Search using BM25 ranking."""
+    global _bm25_index, _bm25_docs, _bm25_metadata
+
+    # Wait for database to be ready
+    try:
+        wait_for_db(timeout=120.0)
+    except (TimeoutError, RuntimeError) as exc:
+        return {"error": f"Database not ready: {exc}"}
+
+    # Build index if not exists
+    if _bm25_index is None:
+        db_path = Path.home() / ".codemem" / "codemem.sqlite"
+        build_bm25_index(db_path)
+
+        if _bm25_index is None:
+            return {"error": "BM25 index not available. Database may be empty."}
+
+    # Enforce maximum limit
+    MAX_LIMIT = 50
+    if limit > MAX_LIMIT:
+        limit = MAX_LIMIT
+
+    # Tokenize query
+    query_tokens = query.lower().split()
+
+    # Get BM25 scores
+    scores = _bm25_index.get_scores(query_tokens)
+
+    # Get top results
+    top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:limit]
+
+    results = []
+    for idx in top_indices:
+        if scores[idx] > 0:  # Only include results with positive scores
+            meta = _bm25_metadata[idx]
+            results.append({
+                "event_id": meta["event_id"],
+                "timestamp": meta["timestamp"],
+                "role": meta["role"],
+                "text": meta["text"][:200] + "..." if len(meta["text"]) > 200 else meta["text"],
+                "session_id": meta["session_id"],
+                "platform": meta["platform"],
+                "score": float(scores[idx])
+            })
+
+    return {
+        "query": query,
+        "results": results,
+        "count": len(results)
+    }
+
+
 def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> None:
     home = Path.home()
 
@@ -477,6 +584,8 @@ def build_db_background(db_path: Path, include_history: bool, extra_roots: List[
                 export_sessions(db_path, md_sessions_dir, include_meta=False)
             except OSError:
                 pass
+        # Build BM25 index after database is ready
+        build_bm25_index(db_path)
         _db_ready.set()
     except Exception as exc:
         _db_build_error = str(exc)
@@ -795,6 +904,18 @@ def main() -> int:
             },
         },
         {
+            "name": "semantic.search",
+            "description": "Search conversations using natural language (BM25). No SQL needed! Just describe what you're looking for.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language search query (e.g., 'Python debugging tips')"},
+                    "limit": {"type": "integer", "default": 20, "description": "Max results to return (max 50)"},
+                },
+                "required": ["query"],
+            },
+        },
+        {
             "name": "text.shell",
             "description": "Run rg/sed/awk against md_sessions with a restricted allowlist.",
             "inputSchema": {
@@ -991,6 +1112,34 @@ def main() -> int:
                         "limit_applied": limit,
                         "row_count": len(result.get("rows", [])),
                     }
+                respond(msg_id, payload)
+                continue
+            if name == "semantic.search":
+                query = args.get("query", "")
+                limit = parse_int(args.get("limit", 20), 20)
+                result = bm25_search(query, limit)
+
+                # Format results as text
+                if "error" in result:
+                    text = result["error"]
+                else:
+                    lines = [f"Found {result['count']} results for: '{result['query']}'", ""]
+                    for i, r in enumerate(result.get("results", [])[:10], 1):
+                        lines.append(f"{i}. [{r['role']}] {r['text']}")
+                        lines.append(f"   Session: {r['session_id']} | Platform: {r['platform']} | Score: {r['score']:.2f}")
+                        lines.append("")
+                    text = "\n".join(lines)
+
+                payload = {
+                    "content": [{"type": "text", "text": text}],
+                    "data": result,
+                    "ok": "error" not in result,
+                }
+                if "error" in result:
+                    payload["isError"] = True
+                    payload["error"] = {"code": "SEARCH_ERROR", "message": result["error"]}
+                else:
+                    payload["meta"] = {"result_count": result["count"]}
                 respond(msg_id, payload)
                 continue
             if name == "text.shell":
