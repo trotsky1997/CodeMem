@@ -52,6 +52,10 @@ from query_rewriter import (
     generate_did_you_mean,
     analyze_query_quality
 )
+from pattern_analyzer import (
+    PatternAnalyzer,
+    format_insights_report
+)
 
 
 # Initialize tiktoken encoder
@@ -690,12 +694,68 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
             return response
 
         elif parsed.intent == QueryIntent.PATTERN_DISCOVERY:
-            # Pattern discovery - future implementation
-            # For now, return activity summary as a proxy
-            activity_data = await get_recent_activity_async(days=30)
-            response = format_activity_summary(activity_data)
-            response["insights"].insert(0, "模式发现功能正在开发中，这里显示最近 30 天的活动摘要")
-            response["metadata"]["context_id"] = ctx.context_id
+            # Pattern discovery - Phase 4 implementation
+            days = 30  # default
+            if parsed.time_range:
+                start_time, end_time = parsed.time_range
+                days = (end_time - start_time).days or 30
+
+            # Get events from database
+            conn = await get_db_connection()
+            cursor = await conn.execute("""
+                SELECT timestamp, role, text, session_id, platform
+                FROM events
+                WHERE timestamp >= datetime('now', '-' || ? || ' days')
+                ORDER BY timestamp DESC
+                LIMIT 1000
+            """, (days,))
+
+            rows = await cursor.fetchall()
+
+            # Convert to event dicts
+            events = []
+            for row in rows:
+                events.append({
+                    "timestamp": row[0],
+                    "role": row[1],
+                    "text": row[2],
+                    "session_id": row[3],
+                    "platform": row[4]
+                })
+
+            # Analyze patterns
+            analyzer = PatternAnalyzer(events)
+            insights_report = analyzer.generate_insights_report(days=days)
+
+            # Format as natural language
+            formatted_report = format_insights_report(insights_report)
+
+            response = {
+                "summary": insights_report["summary"],
+                "insights": [
+                    f"分析了 {insights_report['total_events']} 条消息",
+                    f"涵盖 {insights_report['total_sessions']} 次会话",
+                    f"时间范围：{insights_report['period']}"
+                ],
+                "key_findings": [{
+                    "report": formatted_report,
+                    "frequent_topics": insights_report["frequent_topics"][:3],
+                    "activity_patterns": insights_report["activity_patterns"],
+                    "unresolved_count": len(insights_report["unresolved_questions"])
+                }],
+                "suggestions": [
+                    "查看高频话题的详细讨论？",
+                    "探索未解决的问题？",
+                    "分析特定话题的知识演进？"
+                ],
+                "metadata": {
+                    "query": query,
+                    "intent": "pattern_discovery",
+                    "context_id": ctx.context_id,
+                    "days_analyzed": days
+                }
+            }
+
             ctx.add_query(query, [])
             return response
 
@@ -937,15 +997,31 @@ async def main_async():
                 }
             ),
             Tool(
-                name="activity.recent",
-                description="[Legacy] 获取最近的活动记录。推荐使用 memory.query 代替。",
+                name="memory.insights",
+                description=(
+                    "🔍 记忆洞察 - 分析用户行为模式和知识演进。\n\n"
+                    "功能：\n"
+                    "- 高频话题分析\n"
+                    "- 活动时间模式\n"
+                    "- 知识演进追踪\n"
+                    "- 未解决问题发现\n\n"
+                    "返回详细的洞察报告。"
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "days": {"type": "integer", "description": "天数", "default": 7}
+                        "days": {
+                            "type": "integer",
+                            "description": "分析天数（默认 30 天）",
+                            "default": 30
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "可选：分析特定话题的知识演进"
+                        }
                     }
                 }
-            )
+            ),
         ]
 
     @server.call_tool()
@@ -995,6 +1071,54 @@ async def main_async():
 
                 result = await bm25_search_async(query, limit=top_k, source=source)
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            elif name == "memory.insights":
+                days = arguments.get("days", 30)
+                topic = arguments.get("topic")
+
+                # Get events from database
+                conn = await get_db_connection()
+                cursor = await conn.execute("""
+                    SELECT timestamp, role, text, session_id, platform
+                    FROM events
+                    WHERE timestamp >= datetime('now', '-' || ? || ' days')
+                    ORDER BY timestamp DESC
+                    LIMIT 1000
+                """, (days,))
+
+                rows = await cursor.fetchall()
+
+                # Convert to event dicts
+                events = []
+                for row in rows:
+                    events.append({
+                        "timestamp": row[0],
+                        "role": row[1],
+                        "text": row[2],
+                        "session_id": row[3],
+                        "platform": row[4]
+                    })
+
+                # Analyze patterns
+                analyzer = PatternAnalyzer(events)
+
+                if topic:
+                    # Analyze specific topic evolution
+                    evolution = analyzer.analyze_knowledge_evolution(topic)
+                    response_text = f"# {topic} 知识演进分析\n\n"
+                    response_text += f"**讨论次数**: {evolution['total_discussions']}\n"
+                    response_text += f"**进展**: {evolution['progression']}\n\n"
+
+                    if evolution['stages']:
+                        response_text += "## 讨论阶段\n"
+                        for stage in evolution['stages'][:5]:
+                            response_text += f"- {stage['stage']}: {stage['text_preview'][:80]}...\n"
+                else:
+                    # Generate full insights report
+                    insights_report = analyzer.generate_insights_report(days=days)
+                    response_text = format_insights_report(insights_report)
+
+                return [TextContent(type="text", text=response_text)]
 
             elif name == "activity.recent":
                 days = arguments.get("days", 7)
