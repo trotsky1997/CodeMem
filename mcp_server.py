@@ -53,7 +53,131 @@ RESOURCES = [
         "description": "Common query patterns and examples",
         "mimeType": "text/markdown",
     },
+    {
+        "uri": "codemem://stats/summary",
+        "name": "database statistics",
+        "description": "Pre-computed statistics and aggregations (saves tokens)",
+        "mimeType": "text/markdown",
+    },
 ]
+
+
+def generate_stats_summary(conn: sqlite3.Connection) -> str:
+    """Generate pre-computed statistics to save agent tokens."""
+    try:
+        wait_for_db(timeout=5.0)
+    except (TimeoutError, RuntimeError):
+        return "# Database Statistics\n\nDatabase is still building. Please try again in a moment."
+
+    lines = ["# Database Statistics", "", "**Quick overview to help you understand what's available without querying.**", ""]
+
+    # Total counts
+    try:
+        total_events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        total_raw = conn.execute("SELECT COUNT(*) FROM events_raw").fetchone()[0]
+        lines.extend([
+            "## Overview",
+            f"- Total searchable events: **{total_events:,}**",
+            f"- Total raw events: **{total_raw:,}**",
+            ""
+        ])
+    except sqlite3.Error:
+        pass
+
+    # Platform breakdown
+    try:
+        platforms = conn.execute("""
+            SELECT platform, COUNT(*) as count
+            FROM events
+            GROUP BY platform
+            ORDER BY count DESC
+        """).fetchall()
+        if platforms:
+            lines.extend(["## By Platform", ""])
+            for platform, count in platforms:
+                lines.append(f"- **{platform}**: {count:,} events")
+            lines.append("")
+    except sqlite3.Error:
+        pass
+
+    # Role breakdown
+    try:
+        roles = conn.execute("""
+            SELECT role, COUNT(*) as count
+            FROM events
+            GROUP BY role
+            ORDER BY count DESC
+        """).fetchall()
+        if roles:
+            lines.extend(["## By Role", ""])
+            for role, count in roles:
+                lines.append(f"- **{role}**: {count:,} events")
+            lines.append("")
+    except sqlite3.Error:
+        pass
+
+    # Top sessions
+    try:
+        sessions = conn.execute("""
+            SELECT session_id, COUNT(*) as count
+            FROM events
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id
+            ORDER BY count DESC
+            LIMIT 10
+        """).fetchall()
+        if sessions:
+            lines.extend(["## Top 10 Sessions (by message count)", ""])
+            for session_id, count in sessions:
+                lines.append(f"- `{session_id}`: {count} messages")
+            lines.append("")
+    except sqlite3.Error:
+        pass
+
+    # Recent activity
+    try:
+        recent = conn.execute("""
+            SELECT DATE(timestamp) as date, COUNT(*) as count
+            FROM events
+            WHERE timestamp IS NOT NULL
+            GROUP BY DATE(timestamp)
+            ORDER BY date DESC
+            LIMIT 7
+        """).fetchall()
+        if recent:
+            lines.extend(["## Recent Activity (last 7 days)", ""])
+            for date, count in recent:
+                lines.append(f"- **{date}**: {count} events")
+            lines.append("")
+    except sqlite3.Error:
+        pass
+
+    # Tool usage
+    try:
+        tools = conn.execute("""
+            SELECT tool_name, COUNT(*) as count
+            FROM events_raw
+            WHERE tool_name IS NOT NULL
+            GROUP BY tool_name
+            ORDER BY count DESC
+            LIMIT 10
+        """).fetchall()
+        if tools:
+            lines.extend(["## Top 10 Tools Used", ""])
+            for tool, count in tools:
+                lines.append(f"- **{tool}**: {count} times")
+            lines.append("")
+    except sqlite3.Error:
+        pass
+
+    lines.extend([
+        "---",
+        "",
+        "**Tip**: Use this summary to understand your data before querying.",
+        "Check `codemem://query/templates` for query examples."
+    ])
+
+    return "\n".join(lines)
 
 
 def query_templates_markdown() -> str:
@@ -753,6 +877,21 @@ def main() -> int:
                 continue
             if uri == "codemem://query/templates":
                 text = query_templates_markdown()
+                respond(
+                    msg_id,
+                    {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": "text/markdown",
+                                "text": text,
+                            }
+                        ]
+                    },
+                )
+                continue
+            if uri == "codemem://stats/summary":
+                text = generate_stats_summary(get_conn())
                 respond(
                     msg_id,
                     {
