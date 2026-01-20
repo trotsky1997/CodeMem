@@ -453,7 +453,7 @@ def main() -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Check if database needs to be built
-    needs_build = not db_path.exists() or args.rebuild
+    needs_build = not db_path.exists() or args.rebuild or db_path.stat().st_size == 0
 
     if needs_build:
         if db_path.exists():
@@ -469,7 +469,13 @@ def main() -> int:
         # Database exists, mark as ready immediately
         _db_ready.set()
 
-    conn = sqlite3.connect(str(db_path))
+    # Lazy connection - will be created when first query arrives
+    conn = None
+    def get_conn():
+        nonlocal conn
+        if conn is None:
+            conn = sqlite3.connect(str(db_path))
+        return conn
     tools = [
         {
             "name": "sql.query",
@@ -614,8 +620,8 @@ def main() -> int:
                 respond_error(msg_id, -32602, "unknown resource")
                 continue
             table = uri.split("/")[-1]
-            text = table_schema_markdown(conn, table)
-            data = table_schema_data(conn, table)
+            text = table_schema_markdown(get_conn(), table)
+            data = table_schema_data(get_conn(), table)
             respond(
                 msg_id,
                 {
@@ -640,7 +646,7 @@ def main() -> int:
                 preview = bool(args.get("preview", False))
                 preview_rows = clamp_int(parse_int(args.get("preview_rows", 5), 5), 1, 50)
                 preview_cell_len = clamp_int(parse_int(args.get("preview_cell_len", 80), 80), 10, 200)
-                result = sql_query(conn, query, limit)
+                result = sql_query(get_conn(), query, limit)
                 payload: Dict[str, Any] = {
                     "content": [
                         {
@@ -691,7 +697,8 @@ def main() -> int:
         else:
             respond_error(msg_id, -32601, "unknown method")
 
-    conn.close()
+    if conn:
+        conn.close()
     return 0
 
 
