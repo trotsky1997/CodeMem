@@ -8,12 +8,14 @@ Provides one tool: sql.query
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -39,6 +41,13 @@ _db_build_error: str | None = None
 _bm25_index = None
 _bm25_docs = []
 _bm25_metadata = []
+
+# Query cache with LRU and TTL
+_query_cache: Dict[str, Tuple[Any, float]] = {}
+_cache_hits = 0
+_cache_misses = 0
+_cache_max_size = 100
+_cache_ttl = 3600  # 1 hour
 
 RESOURCES = [
     {
@@ -66,6 +75,58 @@ RESOURCES = [
         "mimeType": "text/markdown",
     },
 ]
+
+
+def cache_key(prefix: str, query: str, **kwargs) -> str:
+    """Generate cache key from query and parameters."""
+    key_data = f"{prefix}:{query}:{json.dumps(kwargs, sort_keys=True)}"
+    return hashlib.md5(key_data.encode()).hexdigest()
+
+
+def get_from_cache(key: str) -> Any | None:
+    """Get result from cache if not expired."""
+    global _cache_hits, _cache_misses
+
+    if key in _query_cache:
+        result, timestamp = _query_cache[key]
+        if time.time() - timestamp < _cache_ttl:
+            _cache_hits += 1
+            return result
+        else:
+            # Expired, remove it
+            del _query_cache[key]
+
+    _cache_misses += 1
+    return None
+
+
+def put_in_cache(key: str, result: Any) -> None:
+    """Put result in cache with LRU eviction."""
+    global _query_cache
+
+    # LRU eviction if cache is full
+    if len(_query_cache) >= _cache_max_size:
+        # Remove oldest entry
+        oldest_key = min(_query_cache.keys(), key=lambda k: _query_cache[k][1])
+        del _query_cache[oldest_key]
+
+    _query_cache[key] = (result, time.time())
+
+
+def get_cache_stats() -> Dict[str, Any]:
+    """Get cache statistics."""
+    total = _cache_hits + _cache_misses
+    hit_rate = (_cache_hits / total * 100) if total > 0 else 0
+
+    return {
+        "hits": _cache_hits,
+        "misses": _cache_misses,
+        "total_requests": total,
+        "hit_rate": f"{hit_rate:.1f}%",
+        "cache_size": len(_query_cache),
+        "max_size": _cache_max_size,
+        "ttl_seconds": _cache_ttl
+    }
 
 
 def generate_stats_summary(conn: sqlite3.Connection) -> str:
@@ -177,6 +238,18 @@ def generate_stats_summary(conn: sqlite3.Connection) -> str:
         pass
 
     lines.extend([
+        "---",
+        "",
+        "## Cache Statistics",
+        "",
+    ])
+
+    cache_stats = get_cache_stats()
+    lines.extend([
+        f"- **Hit rate**: {cache_stats['hit_rate']} ({cache_stats['hits']} hits / {cache_stats['total_requests']} total)",
+        f"- **Cache size**: {cache_stats['cache_size']} / {cache_stats['max_size']} entries",
+        f"- **TTL**: {cache_stats['ttl_seconds']} seconds",
+        "",
         "---",
         "",
         "**Tip**: Use this summary to understand your data before querying.",
@@ -452,6 +525,12 @@ def bm25_search(query: str, limit: int = 20) -> Dict[str, Any]:
     """Search using BM25 ranking."""
     global _bm25_index, _bm25_docs, _bm25_metadata
 
+    # Check cache first
+    key = cache_key("bm25", query, limit=limit)
+    cached = get_from_cache(key)
+    if cached is not None:
+        return cached
+
     # Wait for database to be ready
     try:
         wait_for_db(timeout=120.0)
@@ -494,11 +573,15 @@ def bm25_search(query: str, limit: int = 20) -> Dict[str, Any]:
                 "score": float(scores[idx])
             })
 
-    return {
+    result = {
         "query": query,
         "results": results,
         "count": len(results)
     }
+
+    # Cache the result
+    put_in_cache(key, result)
+    return result
 
 
 def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> None:
@@ -601,6 +684,12 @@ def wait_for_db(timeout: float = 60.0) -> None:
 
 
 def sql_query(conn: sqlite3.Connection, query: str, limit: int) -> Dict[str, Any]:
+    # Check cache first
+    key = cache_key("sql", query, limit=limit)
+    cached = get_from_cache(key)
+    if cached is not None:
+        return cached
+
     # Wait for database to be ready before executing queries
     try:
         wait_for_db(timeout=120.0)
@@ -639,13 +728,17 @@ def sql_query(conn: sqlite3.Connection, query: str, limit: int) -> Dict[str, Any
         # Additional safety check
         if len(rows) > MAX_LIMIT:
             rows = rows[:MAX_LIMIT]
-            return {
+            result = {
                 "columns": cols,
                 "rows": rows,
                 "warning": f"Results truncated to {MAX_LIMIT} rows. Use more specific WHERE conditions to narrow your search."
             }
+        else:
+            result = {"columns": cols, "rows": rows}
 
-        return {"columns": cols, "rows": rows}
+        # Cache the result
+        put_in_cache(key, result)
+        return result
     except sqlite3.Error as exc:
         return {"error": f"sqlite error: {exc}; query={exec_q}"}
 
