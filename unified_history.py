@@ -141,6 +141,50 @@ def detect_platform(source_file: Optional[str]) -> str:
     return "unknown"
 
 
+def extract_claude_items(
+    record: Dict[str, Any],
+) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[bool]]:
+    """Extract items from Claude Code format."""
+    rtype = record.get("type")
+    role = None
+    items: List[Dict[str, Any]] = []
+    is_meta = None
+
+    if rtype in ("user", "assistant"):
+        role = rtype
+        message = record.get("message", {})
+        if isinstance(message, dict):
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict):
+                        ctype = c.get("type")
+                        if ctype == "text":
+                            items.append({"type": "text", "text": c.get("text")})
+                        elif ctype == "thinking":
+                            items.append({"type": "thinking", "text": c.get("thinking")})
+                        elif ctype == "tool_use":
+                            items.append({
+                                "type": "tool_use",
+                                "name": c.get("name"),
+                                "input": c.get("input"),
+                            })
+                        elif ctype == "tool_result":
+                            items.append({"type": "tool_result", "content": c.get("content")})
+                        else:
+                            items.append({"type": ctype or "unknown", "text": str(c)})
+            elif isinstance(content, str):
+                items.append({"type": "text", "text": content})
+    elif rtype == "summary":
+        role = "system"
+        is_meta = True
+        summary_text = record.get("summary", "")
+        if summary_text:
+            items.append({"type": "text", "text": summary_text})
+
+    return role, items, is_meta
+
+
 def extract_codex_items(
     record: Dict[str, Any],
 ) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[bool]]:
@@ -478,7 +522,11 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         source_file = r.get("_source")
         platform = detect_platform(source_file)
 
-        if platform == "codex":
+        if platform == "claude":
+            role, items, is_meta = extract_claude_items(r)
+            session_id = shorten_uuid(r.get("sessionId"))
+            message_id = shorten_uuid(r.get("uuid"))
+        elif platform == "codex":
             role, items, is_meta = extract_codex_items(r)
             msg = r.get("payload") or {}
             session_id = (
