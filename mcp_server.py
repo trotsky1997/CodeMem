@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import pandas as pd
 from rank_bm25 import BM25Okapi
 import tiktoken
 
@@ -953,19 +952,61 @@ def build_db(db_path: Path, include_history: bool, extra_roots: List[Path]) -> N
 
     files = collect_files(roots)
     records = load_records(files)
-    df = to_df(records)
+    rows = to_df(records)
 
-    df = df.copy()
-    for col in ("tool_args", "tool_result", "raw_json"):
-        if col in df.columns:
-            df[col] = df[col].apply(
-                lambda v: json.dumps(v, ensure_ascii=False, default=str)
-                if isinstance(v, (dict, list))
-                else ("" if v is None else v)
-            )
+    # Convert dict/list fields to JSON strings
+    for row in rows:
+        for col in ("tool_args", "tool_result", "raw_json"):
+            if col in row:
+                v = row[col]
+                if isinstance(v, (dict, list)):
+                    row[col] = json.dumps(v, ensure_ascii=False, default=str)
+                elif v is None:
+                    row[col] = ""
 
+    # Insert rows into SQLite
     with sqlite3.connect(str(db_path)) as conn:
-        df.to_sql("events_raw", conn, if_exists="replace", index=False)
+        if rows:
+            # Get column names from first row
+            columns = list(rows[0].keys())
+            placeholders = ",".join(["?"] * len(columns))
+
+            # Create table
+            conn.execute("DROP TABLE IF EXISTS events_raw")
+
+            # Insert data
+            conn.executemany(
+                f"INSERT INTO events_raw ({','.join(columns)}) VALUES ({placeholders})",
+                [tuple(row[col] for col in columns) for row in rows]
+            )
+        else:
+            # Create empty table with schema
+            conn.execute("DROP TABLE IF EXISTS events_raw")
+            conn.execute("""
+                CREATE TABLE events_raw (
+                    platform TEXT,
+                    session_id TEXT,
+                    message_id TEXT,
+                    turn_id TEXT,
+                    item_index INTEGER,
+                    line_number INTEGER,
+                    timestamp TEXT,
+                    role TEXT,
+                    is_meta INTEGER,
+                    agent_id TEXT,
+                    is_indexable INTEGER,
+                    item_type TEXT,
+                    text TEXT,
+                    index_text TEXT,
+                    tool_name TEXT,
+                    tool_args TEXT,
+                    tool_result TEXT,
+                    tool_result_summary TEXT,
+                    source_file TEXT,
+                    raw_json TEXT
+                )
+            """)
+
         conn.execute("create index if not exists idx_events_raw_time on events_raw(timestamp)")
         conn.execute("create index if not exists idx_events_raw_indexable on events_raw(is_indexable)")
         conn.execute("drop table if exists events")

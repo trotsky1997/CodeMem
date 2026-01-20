@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Dict, Any, Tuple, Optional
 
-import pandas as pd
-
 sys.path.append(str(Path(__file__).parent))
 
 from models import UnifiedEventRow
@@ -471,7 +469,8 @@ def load_records(files: List[Path]) -> List[Dict[str, Any]]:
     return deduped
 
 
-def to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
+def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert records to list of dicts (replaces pandas DataFrame)."""
     rows = []
     turn_counters: Dict[str, int] = {}
     current_turn: Dict[str, str] = {}
@@ -603,13 +602,7 @@ def to_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
                     raw_json=r,
                 )
                 rows.append(row.model_dump())
-    if not rows:
-        if hasattr(UnifiedEventRow, "model_fields"):
-            cols = list(UnifiedEventRow.model_fields.keys())
-        else:
-            cols = list(UnifiedEventRow.__fields__.keys())
-        return pd.DataFrame(columns=cols)
-    return pd.DataFrame(rows)
+    return rows
 
 
 def main() -> int:
