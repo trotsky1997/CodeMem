@@ -11,6 +11,7 @@ import json
 import hashlib
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Dict, Any, Tuple, Optional
@@ -232,8 +233,19 @@ def collect_files(roots: List[Path]) -> List[Path]:
 
 def load_records(files: List[Path]) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
-    for p in files:
-        records.extend(iter_jsonl(p))
+
+    # Parallel file loading with ThreadPoolExecutor
+    def load_file(p: Path) -> List[Dict[str, Any]]:
+        return list(iter_jsonl(p))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(load_file, p): p for p in files}
+        for future in as_completed(futures):
+            try:
+                records.extend(future.result())
+            except Exception as exc:
+                # Log error but continue processing other files
+                print(f"Error loading {futures[future]}: {exc}", file=sys.stderr)
 
     first_agent_idx: Dict[str, int] = {}
     for i, r in enumerate(records):
