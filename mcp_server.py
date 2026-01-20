@@ -440,14 +440,69 @@ async def main_async():
     _db_path = Path(args.db)
     _db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Find latest versioned database if symlink doesn't exist or is broken
+    def find_latest_db() -> Optional[Path]:
+        """Find the latest versioned database file."""
+        db_dir = _db_path.parent
+        db_stem = _db_path.stem
+        # Find all versioned databases: codemem-{timestamp}.db
+        versioned_dbs = list(db_dir.glob(f"{db_stem}-*.db"))
+        if not versioned_dbs:
+            return None
+        # Sort by timestamp (extracted from filename)
+        versioned_dbs.sort(key=lambda p: int(p.stem.split('-')[-1]), reverse=True)
+        return versioned_dbs[0]
+
     # Check if rebuild needed
-    needs_build = not _db_path.exists() or args.rebuild or (_db_path.exists() and _db_path.stat().st_size == 0)
+    needs_build = args.rebuild
+
+    if not needs_build:
+        # Try to use existing database
+        if _db_path.exists() and _db_path.is_symlink():
+            # Resolve symlink
+            try:
+                _db_path = _db_path.resolve()
+                if _db_path.exists() and _db_path.stat().st_size > 0:
+                    needs_build = False
+                else:
+                    needs_build = True
+            except Exception:
+                needs_build = True
+        elif _db_path.exists() and not _db_path.is_symlink():
+            # Direct file (not symlink)
+            if _db_path.stat().st_size > 0:
+                needs_build = False
+            else:
+                needs_build = True
+        else:
+            # Try to find latest versioned database
+            latest_db = find_latest_db()
+            if latest_db and latest_db.stat().st_size > 0:
+                _db_path = latest_db
+                needs_build = False
+            else:
+                needs_build = True
 
     if needs_build:
         # Use versioned database files with symlink
         import time
         timestamp = int(time.time())
         versioned_db = _db_path.parent / f"{_db_path.stem}-{timestamp}.db"
+
+        # Clean up old versioned databases (keep last 3)
+        db_dir = _db_path.parent
+        db_stem = _db_path.stem
+        old_dbs = list(db_dir.glob(f"{db_stem}-*.db"))
+        if old_dbs:
+            # Sort by timestamp
+            old_dbs.sort(key=lambda p: int(p.stem.split('-')[-1]), reverse=True)
+            # Keep last 3, delete the rest
+            for old_db in old_dbs[3:]:
+                try:
+                    old_db.unlink()
+                    print(f"Deleted old database: {old_db.name}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Could not delete {old_db.name}: {e}", file=sys.stderr)
 
         # Build new database with versioned name
         asyncio.create_task(build_db_async(versioned_db, args.include_history, [Path(p) for p in args.root]))
@@ -471,10 +526,6 @@ async def main_async():
 
         asyncio.create_task(update_symlink_after_build())
     else:
-        # Resolve symlink if it exists
-        if _db_path.is_symlink():
-            _db_path = _db_path.resolve()
-
         _db_ready.set()
         # Build indexes in background
         asyncio.create_task(build_bm25_index_async())
