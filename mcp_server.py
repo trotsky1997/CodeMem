@@ -21,11 +21,16 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from rank_bm25 import BM25Okapi
+import jieba
 
 sys.path.append(str(Path(__file__).parent))
 
 from unified_history import collect_files, load_records, to_df
 from export_sessions_md import export_sessions
+
+
+# Disable jieba logging
+jieba.setLogLevel(jieba.logging.INFO)
 
 
 MD_SESSIONS_DIR = Path.home() / ".codemem" / "md_sessions"
@@ -75,6 +80,26 @@ RESOURCES = [
         "mimeType": "text/markdown",
     },
 ]
+
+
+def smart_tokenize(text: str) -> List[str]:
+    """Smart tokenization supporting both English and Chinese."""
+    if not text:
+        return []
+
+    # Check if text contains Chinese characters
+    has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
+
+    if has_chinese:
+        # Use jieba for Chinese text
+        tokens = list(jieba.cut_for_search(text.lower()))
+        # Filter out single-character tokens and punctuation
+        tokens = [t for t in tokens if len(t) > 1 or t.isalnum()]
+    else:
+        # Simple split for English
+        tokens = text.lower().split()
+
+    return tokens
 
 
 def cache_key(prefix: str, query: str, **kwargs) -> str:
@@ -501,8 +526,8 @@ def build_bm25_index(db_path: Path) -> None:
         _bm25_metadata = []
 
         for event_id, timestamp, role, text, session_id, platform in rows:
-            # Simple tokenization (split by whitespace and lowercase)
-            tokens = text.lower().split()
+            # Smart tokenization (supports Chinese and English)
+            tokens = smart_tokenize(text)
             _bm25_docs.append(tokens)
             _bm25_metadata.append({
                 "event_id": event_id,
@@ -550,8 +575,8 @@ def bm25_search(query: str, limit: int = 20) -> Dict[str, Any]:
     if limit > MAX_LIMIT:
         limit = MAX_LIMIT
 
-    # Tokenize query
-    query_tokens = query.lower().split()
+    # Smart tokenization for query (supports Chinese and English)
+    query_tokens = smart_tokenize(query)
 
     # Get BM25 scores
     scores = _bm25_index.get_scores(query_tokens)
