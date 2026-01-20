@@ -47,7 +47,127 @@ RESOURCES = [
         "description": "Schema for events_raw",
         "mimeType": "text/markdown",
     },
+    {
+        "uri": "codemem://query/templates",
+        "name": "query templates",
+        "description": "Common query patterns and examples",
+        "mimeType": "text/markdown",
+    },
 ]
+
+
+def query_templates_markdown() -> str:
+    return """# Common Query Templates
+
+## Basic Queries
+
+### 1. Recent conversations (most common)
+```sql
+SELECT event_id, timestamp, role, text, session_id
+FROM events
+ORDER BY timestamp DESC
+LIMIT 20;
+```
+
+### 2. Search by keyword
+```sql
+SELECT event_id, timestamp, role, text, session_id
+FROM events
+WHERE text LIKE '%keyword%'
+ORDER BY timestamp DESC
+LIMIT 20;
+```
+
+### 3. Get specific session
+```sql
+SELECT event_id, timestamp, role, text
+FROM events
+WHERE session_id = 'abc12345'
+ORDER BY timestamp ASC
+LIMIT 50;
+```
+
+### 4. Count by platform
+```sql
+SELECT platform, COUNT(*) as count
+FROM events
+GROUP BY platform;
+```
+
+### 5. Recent user messages
+```sql
+SELECT event_id, timestamp, text, session_id
+FROM events
+WHERE role = 'user'
+ORDER BY timestamp DESC
+LIMIT 20;
+```
+
+### 6. Recent assistant responses
+```sql
+SELECT event_id, timestamp, text, session_id
+FROM events
+WHERE role = 'assistant'
+ORDER BY timestamp DESC
+LIMIT 20;
+```
+
+## Advanced Queries
+
+### 7. Sessions with most messages
+```sql
+SELECT session_id, COUNT(*) as msg_count
+FROM events
+WHERE session_id IS NOT NULL
+GROUP BY session_id
+ORDER BY msg_count DESC
+LIMIT 20;
+```
+
+### 8. Search across specific platform
+```sql
+SELECT event_id, timestamp, role, text, session_id
+FROM events
+WHERE platform = 'claude' AND text LIKE '%search term%'
+ORDER BY timestamp DESC
+LIMIT 20;
+```
+
+### 9. Messages from specific date
+```sql
+SELECT event_id, timestamp, role, text, session_id
+FROM events
+WHERE timestamp LIKE '2026-01-20%'
+ORDER BY timestamp DESC
+LIMIT 50;
+```
+
+### 10. Get tool usage (from events_raw)
+```sql
+SELECT timestamp, tool_name, tool_result_summary, session_id
+FROM events_raw
+WHERE tool_name IS NOT NULL
+ORDER BY timestamp DESC
+LIMIT 20;
+```
+
+## Tips
+
+- **Always use LIMIT**: Maximum 50 rows allowed
+- **Use WHERE**: Filter by session_id, platform, role, or timestamp
+- **Search text**: Use `text LIKE '%keyword%'` for full-text search
+- **Order by timestamp**: Usually `ORDER BY timestamp DESC` for recent first
+- **Platform values**: 'claude', 'codex', 'opencode', 'cursor'
+- **Role values**: 'user', 'assistant', 'system'
+
+## Performance Tips
+
+- Add `WHERE session_id = 'xxx'` to limit scope
+- Use `timestamp LIKE '2026-01%'` for date filtering
+- Avoid `SELECT *` - specify needed columns
+- Use `events` table for text search (faster, indexed)
+- Use `events_raw` table only when you need tool details or raw_json
+"""
 
 
 def sessions_index_markdown(md_dir: Path) -> str:
@@ -618,6 +738,21 @@ def main() -> int:
                     except OSError:
                         pass
                 text = sessions_index_markdown(MD_SESSIONS_DIR)
+                respond(
+                    msg_id,
+                    {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": "text/markdown",
+                                "text": text,
+                            }
+                        ]
+                    },
+                )
+                continue
+            if uri == "codemem://query/templates":
+                text = query_templates_markdown()
                 respond(
                     msg_id,
                     {
