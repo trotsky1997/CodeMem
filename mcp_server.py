@@ -48,10 +48,7 @@ _db_ready = asyncio.Event()
 _db_build_error: Optional[str] = None
 _db_path: Optional[Path] = None
 
-# BM25 indexes (shared across async tasks)
-_bm25_index = None
-_bm25_docs = []
-_bm25_metadata = []
+# BM25 index (markdown only)
 _bm25_md_index = None
 _bm25_md_docs = []
 _bm25_md_metadata = []
@@ -122,50 +119,6 @@ def cache_key(tool: str, *args, **kwargs) -> str:
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
-def build_bm25_index_sync(db_path: Path) -> Tuple[Any, List, List]:
-    """Build BM25 index (runs in process pool)."""
-    import sqlite3
-
-    try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT event_id, timestamp, role, text, session_id, platform
-            FROM events
-            WHERE text IS NOT NULL AND text != ''
-            ORDER BY timestamp DESC
-            LIMIT 10000
-        """)
-
-        rows = cursor.fetchall()
-        conn.close()
-
-        if not rows:
-            return None, [], []
-
-        docs = []
-        metadata = []
-
-        for event_id, timestamp, role, text, session_id, platform in rows:
-            tokens = smart_tokenize(text)
-            docs.append(tokens)
-            metadata.append({
-                "event_id": event_id,
-                "timestamp": timestamp,
-                "role": role,
-                "text": text,
-                "session_id": session_id,
-                "platform": platform
-            })
-
-        index = BM25Okapi(docs)
-        return index, docs, metadata
-
-    except Exception:
-        return None, [], []
-
-
 def build_bm25_md_index_sync(md_sessions_dir: Path) -> Tuple[Any, List, List]:
     """Build Markdown BM25 index (runs in process pool)."""
     try:
@@ -217,31 +170,26 @@ def build_bm25_md_index_sync(md_sessions_dir: Path) -> Tuple[Any, List, List]:
         return None, [], []
 
 
-async def build_bm25_indexes_parallel():
-    """Build both BM25 indexes in parallel using process pool."""
-    global _bm25_index, _bm25_docs, _bm25_metadata
+async def build_bm25_index_async():
+    """Build markdown BM25 index."""
     global _bm25_md_index, _bm25_md_docs, _bm25_md_metadata
 
     loop = asyncio.get_event_loop()
 
-    with ProcessPoolExecutor(max_workers=2) as executor:
-        # Build both indexes in parallel
-        sql_future = loop.run_in_executor(executor, build_bm25_index_sync, _db_path)
+    with ProcessPoolExecutor(max_workers=1) as executor:
+        # Build markdown index
         md_future = loop.run_in_executor(executor, build_bm25_md_index_sync, MD_SESSIONS_DIR)
-
-        # Wait for both to complete
-        sql_result, md_result = await asyncio.gather(sql_future, md_future)
+        md_result = await md_future
 
         # Update global state
         async with _bm25_lock:
-            _bm25_index, _bm25_docs, _bm25_metadata = sql_result
             _bm25_md_index, _bm25_md_docs, _bm25_md_metadata = md_result
 
 
-async def bm25_search_async(query: str, limit: int = 20, source: str = "sql") -> Dict[str, Any]:
-    """Async BM25 search."""
+async def bm25_search_async(query: str, limit: int = 20) -> Dict[str, Any]:
+    """Async BM25 search (markdown only)."""
     # Check cache
-    key = cache_key("bm25", query, limit=limit, source=source)
+    key = cache_key("bm25", query, limit=limit)
     cached = await get_from_cache(key)
     if cached is not None:
         return cached
@@ -249,9 +197,9 @@ async def bm25_search_async(query: str, limit: int = 20, source: str = "sql") ->
     # Wait for DB ready
     await asyncio.wait_for(_db_ready.wait(), timeout=120.0)
 
-    # Build indexes if needed
+    # Build index if needed
     async with _bm25_lock:
-        if _bm25_index is None and _bm25_md_index is None:
+        if _bm25_md_index is None:
             pass  # Will be built in background
 
     # Enforce limit
@@ -262,28 +210,8 @@ async def bm25_search_async(query: str, limit: int = 20, source: str = "sql") ->
 
     results = []
 
-    # Search SQL index
-    if source in ("sql", "both") and _bm25_index is not None:
-        async with _bm25_lock:
-            scores = _bm25_index.get_scores(query_tokens)
-            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:limit]
-
-            for idx in top_indices:
-                if scores[idx] > 0:
-                    meta = _bm25_metadata[idx]
-                    results.append({
-                        "event_id": meta.get("event_id"),
-                        "timestamp": meta["timestamp"],
-                        "role": meta["role"],
-                        "text": meta["text"][:200] + "..." if len(meta["text"]) > 200 else meta["text"],
-                        "session_id": meta["session_id"],
-                        "platform": meta["platform"],
-                        "score": float(scores[idx]),
-                        "source": "sql"
-                    })
-
     # Search Markdown index
-    if source in ("markdown", "both") and _bm25_md_index is not None:
+    if _bm25_md_index is not None:
         async with _bm25_lock:
             md_scores = _bm25_md_index.get_scores(query_tokens)
             md_top_indices = sorted(range(len(md_scores)), key=lambda i: md_scores[i], reverse=True)[:limit]
@@ -294,22 +222,17 @@ async def bm25_search_async(query: str, limit: int = 20, source: str = "sql") ->
                     results.append({
                         "timestamp": meta["timestamp"],
                         "role": meta["role"],
-                        "text": meta["text"][:200] + "..." if len(meta["text"]) > 200 else meta["text"],
+                        "text": meta["text"],
                         "session_id": meta["session_id"],
                         "file": meta["file"],
                         "score": float(md_scores[idx]),
                         "source": "markdown"
                     })
 
-    # Sort combined results
-    if source == "both":
-        results = sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
-
     result = {
         "query": query,
         "count": len(results),
-        "results": results,
-        "source": source
+        "results": results
     }
 
     # Cache result
@@ -441,7 +364,7 @@ async def build_db_async(db_path: Path, include_history: bool, extra_roots: List
         await conn.close()
 
         # Build BM25 indexes in parallel
-        await build_bm25_indexes_parallel()
+        await build_bm25_index_async()
 
         # Export markdown sessions
         loop = asyncio.get_event_loop()
@@ -487,7 +410,7 @@ async def main_async():
     else:
         _db_ready.set()
         # Build indexes in background
-        asyncio.create_task(build_bm25_indexes_parallel())
+        asyncio.create_task(build_bm25_index_async())
 
     # Start MCP server
     from mcp.server import Server
@@ -503,25 +426,19 @@ async def main_async():
             Tool(
                 name="semantic.search",
                 description=(
-                    "BM25 语义搜索 - 搜索对话历史。\n\n"
-                    "使用 BM25 算法进行语义搜索，支持中英文分词。\n\n"
+                    "BM25 语义搜索 - 搜索对话历史（仅 Markdown）。\n\n"
+                    "使用 BM25 算法进行语义搜索，支持中英文分词。\n"
+                    "搜索来源：Markdown 导出文件（按行匹配）。\n\n"
                     "参数：\n"
                     "- query: 搜索查询\n"
-                    "- top_k: 返回结果数量（默认 20）\n"
-                    "- source: 搜索来源 (sql/markdown/both，默认 both)\n\n"
+                    "- top_k: 返回结果数量（默认 20）\n\n"
                     "返回：匹配的对话记录，按相关性排序。"
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "搜索查询"},
-                        "top_k": {"type": "integer", "description": "返回结果数量", "default": 20},
-                        "source": {
-                            "type": "string",
-                            "enum": ["sql", "markdown", "both"],
-                            "description": "搜索来源",
-                            "default": "both"
-                        }
+                        "top_k": {"type": "integer", "description": "返回结果数量", "default": 20}
                     },
                     "required": ["query"]
                 }
@@ -600,9 +517,8 @@ async def main_async():
             if name == "semantic.search":
                 query = arguments.get("query", "")
                 top_k = arguments.get("top_k", 20)
-                source = arguments.get("source", "both")
 
-                result = await bm25_search_async(query, limit=top_k, source=source)
+                result = await bm25_search_async(query, limit=top_k)
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
             elif name == "sql.query":
