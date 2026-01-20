@@ -1188,6 +1188,37 @@ def main() -> int:
             },
         },
         {
+            "name": "session.get",
+            "description": "Get full conversation history for a specific session. Use when you need complete context of a session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session ID (8-char hash, e.g., '73133d96')"},
+                },
+                "required": ["session_id"],
+            },
+        },
+        {
+            "name": "tools.usage",
+            "description": "Get tool usage statistics. See which tools were used most frequently.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "default": 30, "description": "Number of days to analyze (default 30)"},
+                },
+            },
+        },
+        {
+            "name": "platform.stats",
+            "description": "Get platform usage breakdown (Claude/Codex/Cursor/OpenCode). See activity distribution across platforms.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "default": 30, "description": "Number of days to analyze (default 30)"},
+                },
+            },
+        },
+        {
             "name": "sql.query",
             "description": "Run read-only SELECT/CTE/PRAGMA queries against the events table. Use ONLY when activity.recent and semantic.search don't work. Check codemem://query/templates for examples.",
             "inputSchema": {
@@ -1411,6 +1442,96 @@ def main() -> int:
                     payload["error"] = {"code": "ACTIVITY_ERROR", "message": result["error"]}
                 else:
                     payload["meta"] = {"session_count": result["session_count"], "days": result["days"]}
+                respond(msg_id, payload)
+                continue
+            if name == "session.get":
+                session_id = args.get("session_id", "")
+                result = get_session_details(get_conn(), session_id)
+
+                # Format results as text
+                if "error" in result:
+                    text = result["error"]
+                else:
+                    lines = [f"Session {result['session_id']} ({result['message_count']} messages)", ""]
+                    for i, msg in enumerate(result.get("messages", [])[:50], 1):
+                        lines.append(f"{i}. [{msg['role']}] {msg['text'][:150]}")
+                        lines.append(f"   Time: {msg['timestamp']}")
+                        lines.append("")
+                    if result['message_count'] > 50:
+                        lines.append(f"... and {result['message_count'] - 50} more messages")
+                    text = "\n".join(lines)
+
+                payload = {
+                    "content": [{"type": "text", "text": text}],
+                    "data": result,
+                    "ok": "error" not in result,
+                }
+                if "error" in result:
+                    payload["isError"] = True
+                    payload["error"] = {"code": "SESSION_ERROR", "message": result["error"]}
+                else:
+                    payload["meta"] = {"message_count": result["message_count"]}
+                respond(msg_id, payload)
+                continue
+            if name == "tools.usage":
+                days = parse_int(args.get("days", 30), 30)
+                if days <= 0:
+                    days = 30
+                result = get_tool_usage(get_conn(), days)
+
+                # Format results as text
+                if "error" in result:
+                    text = result["error"]
+                else:
+                    lines = [f"Tool Usage (last {result['days']} days)", ""]
+                    lines.append(f"Found {result['tool_count']} tools:", "")
+                    for i, tool in enumerate(result.get("tools", []), 1):
+                        lines.append(f"{i}. {tool['name']}")
+                        lines.append(f"   Used {tool['usage_count']} times in {tool['session_count']} sessions")
+                        lines.append(f"   Last used: {tool['last_used']}")
+                        lines.append("")
+                    text = "\n".join(lines)
+
+                payload = {
+                    "content": [{"type": "text", "text": text}],
+                    "data": result,
+                    "ok": "error" not in result,
+                }
+                if "error" in result:
+                    payload["isError"] = True
+                    payload["error"] = {"code": "TOOLS_ERROR", "message": result["error"]}
+                else:
+                    payload["meta"] = {"tool_count": result["tool_count"], "days": result["days"]}
+                respond(msg_id, payload)
+                continue
+            if name == "platform.stats":
+                days = parse_int(args.get("days", 30), 30)
+                if days <= 0:
+                    days = 30
+                result = get_platform_stats(get_conn(), days)
+
+                # Format results as text
+                if "error" in result:
+                    text = result["error"]
+                else:
+                    lines = [f"Platform Statistics (last {result['days']} days)", ""]
+                    for i, platform in enumerate(result.get("platforms", []), 1):
+                        lines.append(f"{i}. {platform['name']}")
+                        lines.append(f"   Events: {platform['event_count']} | Sessions: {platform['session_count']}")
+                        lines.append(f"   Active: {platform['first_seen']} to {platform['last_seen']}")
+                        lines.append("")
+                    text = "\n".join(lines)
+
+                payload = {
+                    "content": [{"type": "text", "text": text}],
+                    "data": result,
+                    "ok": "error" not in result,
+                }
+                if "error" in result:
+                    payload["isError"] = True
+                    payload["error"] = {"code": "PLATFORM_ERROR", "message": result["error"]}
+                else:
+                    payload["meta"] = {"platform_count": len(result.get("platforms", [])), "days": result["days"]}
                 respond(msg_id, payload)
                 continue
             if name == "sql.query":
