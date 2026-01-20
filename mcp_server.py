@@ -157,6 +157,60 @@ def get_cache_stats() -> Dict[str, Any]:
     }
 
 
+def get_recent_activity(conn: sqlite3.Connection, days: int = 7) -> Dict[str, Any]:
+    """Get structured summary of recent activity."""
+    try:
+        wait_for_db(timeout=5.0)
+    except (TimeoutError, RuntimeError) as exc:
+        return {"error": f"Database not ready: {exc}"}
+
+    try:
+        # Get sessions from last N days
+        sessions = conn.execute(f"""
+            SELECT
+                session_id,
+                COUNT(*) as event_count,
+                MIN(timestamp) as first_seen,
+                MAX(timestamp) as last_seen,
+                GROUP_CONCAT(DISTINCT platform) as platforms
+            FROM events
+            WHERE datetime(timestamp) >= datetime('now', '-{days} days')
+            AND session_id IS NOT NULL
+            GROUP BY session_id
+            ORDER BY last_seen DESC
+            LIMIT 10
+        """).fetchall()
+
+        # Get sample messages from each session
+        activity = []
+        for session_id, event_count, first_seen, last_seen, platforms in sessions:
+            # Get user messages from this session
+            messages = conn.execute("""
+                SELECT text
+                FROM events
+                WHERE session_id = ? AND role = 'user'
+                ORDER BY timestamp DESC
+                LIMIT 5
+            """, (session_id,)).fetchall()
+
+            activity.append({
+                "session_id": session_id,
+                "event_count": event_count,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "platforms": platforms,
+                "sample_messages": [msg[0][:100] for msg in messages if msg[0]]
+            })
+
+        return {
+            "days": days,
+            "session_count": len(activity),
+            "sessions": activity
+        }
+    except sqlite3.Error as exc:
+        return {"error": f"Database error: {exc}"}
+
+
 def generate_stats_summary(conn: sqlite3.Connection) -> str:
     """Generate pre-computed statistics to save agent tokens."""
     try:
@@ -998,8 +1052,30 @@ def main() -> int:
         return conn
     tools = [
         {
+            "name": "activity.recent",
+            "description": "Get structured summary of recent activity (FASTEST way to see what you've been working on). Returns sessions with sample messages from last N days. Use this FIRST before sql.query for activity summaries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "default": 7, "description": "Number of days to look back (default 7)"},
+                },
+            },
+        },
+        {
+            "name": "semantic.search",
+            "description": "Search conversations using natural language (BM25). No SQL needed! Just describe what you're looking for. SECOND BEST option after activity.recent for finding content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language search query (e.g., 'Python debugging tips')"},
+                    "limit": {"type": "integer", "default": 20, "description": "Max results to return (max 50)"},
+                },
+                "required": ["query"],
+            },
+        },
+        {
             "name": "sql.query",
-            "description": "Run read-only SELECT/CTE/PRAGMA queries against the events table.",
+            "description": "Run read-only SELECT/CTE/PRAGMA queries against the events table. Use ONLY when activity.recent and semantic.search don't work. Check codemem://query/templates for examples.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1020,18 +1096,6 @@ def main() -> int:
                         "default": 80,
                         "description": "Max cell length in content.text when preview is true (clamped 10-200).",
                     },
-                },
-                "required": ["query"],
-            },
-        },
-        {
-            "name": "semantic.search",
-            "description": "Search conversations using natural language (BM25). No SQL needed! Just describe what you're looking for.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Natural language search query (e.g., 'Python debugging tips')"},
-                    "limit": {"type": "integer", "default": 20, "description": "Max results to return (max 50)"},
                 },
                 "required": ["query"],
             },
@@ -1200,6 +1264,41 @@ def main() -> int:
         elif method == "tools/call":
             name = params.get("name")
             args = params.get("arguments") or {}
+            if name == "activity.recent":
+                days = parse_int(args.get("days", 7), 7)
+                if days <= 0:
+                    days = 7
+                result = get_recent_activity(get_conn(), days)
+
+                # Format results as text
+                if "error" in result:
+                    text = result["error"]
+                else:
+                    lines = [f"Recent Activity (last {result['days']} days)", ""]
+                    lines.append(f"Found {result['session_count']} active sessions:", "")
+                    for i, session in enumerate(result.get("sessions", []), 1):
+                        lines.append(f"{i}. Session {session['session_id']}")
+                        lines.append(f"   Platform: {session['platforms']} | Events: {session['event_count']}")
+                        lines.append(f"   Active: {session['first_seen']} to {session['last_seen']}")
+                        if session.get('sample_messages'):
+                            lines.append(f"   Sample tasks:")
+                            for msg in session['sample_messages'][:3]:
+                                lines.append(f"   - {msg}")
+                        lines.append("")
+                    text = "\n".join(lines)
+
+                payload = {
+                    "content": [{"type": "text", "text": text}],
+                    "data": result,
+                    "ok": "error" not in result,
+                }
+                if "error" in result:
+                    payload["isError"] = True
+                    payload["error"] = {"code": "ACTIVITY_ERROR", "message": result["error"]}
+                else:
+                    payload["meta"] = {"session_count": result["session_count"], "days": result["days"]}
+                respond(msg_id, payload)
+                continue
             if name == "sql.query":
                 query = args.get("query", "")
                 limit = parse_int(args.get("limit", 100), 100)
