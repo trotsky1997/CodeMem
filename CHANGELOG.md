@@ -1,5 +1,81 @@
 # 更新日志
 
+## [0.4.0] - 2026-01-20 - Phase 2: 对话增强
+
+### 🎉 重大更新
+
+**对话上下文管理系统**
+
+Phase 2 实现了完整的对话上下文管理，支持 follow-up 查询和指代词解析。
+
+### 新增功能
+
+- **对话上下文管理**
+  - 自动创建和管理对话上下文
+  - 查询历史追踪（最多 10 条）
+  - 结果缓存和引用
+  - 上下文自动过期（30 分钟 TTL）
+  - LRU 驱逐策略（最多 100 个上下文）
+
+- **Follow-up 查询支持**
+  - 自动检测 follow-up 查询
+  - 使用 `context` 参数传递上下文 ID
+  - 无缝的多轮对话体验
+
+- **指代词自动解析**
+  - 排名引用："第一个"、"第二个"、"第三个"
+  - 内容引用："那段代码"、"那次对话"、"上一个"
+  - 简短查询："详细"、"完整"、"更多"
+
+- **新增模块**
+  - `context_manager.py` - 对话上下文管理
+  - `test_phase2.py` - Phase 2 测试套件
+
+### API 变化
+
+- `memory.query` 现在返回 `context_id` 在 `metadata` 中
+- `memory.query` 支持可选的 `context` 参数用于 follow-up 查询
+
+### 使用示例
+
+```python
+# 第一次查询
+result1 = await memory_query_async("我之前讨论过 Python 异步吗？")
+context_id = result1["metadata"]["context_id"]
+
+# Follow-up 查询
+result2 = await memory_query_async("第一个", context=context_id)
+# 自动解析为第 1 个结果的详细信息
+```
+
+### 向后兼容
+
+- ✅ 所有 v0.3.0 查询仍然有效
+- ✅ `context` 参数是可选的
+- ✅ 不使用 `context` 时行为与 v0.3.0 相同
+
+### 测试
+
+- 新增 24 个 Phase 2 测试用例
+- 所有测试通过 ✅
+
+### 性能
+
+- 查询延迟: +5ms (上下文管理开销)
+- 内存占用: +5MB (上下文存储)
+- 上下文开销: ~1KB/context
+
+### 文档
+
+- 新增 `CHANGELOG_v0.4.0.md` - 详细的 v0.4.0 说明
+- 更新 `AGENT_EXPERIENCE_REDESIGN.md` - Phase 2 完成标记
+
+### 下一步
+
+Phase 3 将添加语义增强和同义词扩展。
+
+---
+
 ## [0.3.0] - 2026-01-20 - Phase 1: Agent Experience First
 
 ### 🎉 重大更新

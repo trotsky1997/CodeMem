@@ -39,6 +39,13 @@ from nl_formatter import (
     format_error_response,
     format_context_response
 )
+from context_manager import (
+    ContextManager,
+    ConversationContext,
+    SearchResult,
+    resolve_reference,
+    is_followup_query
+)
 
 
 # Initialize tiktoken encoder
@@ -73,6 +80,9 @@ _cache_ttl = 3600  # 1 hour
 # Connection pool
 _db_pool: Optional[aiosqlite.Connection] = None
 _pool_lock = asyncio.Lock()
+
+# Context manager (Phase 2)
+_context_manager: Optional[ContextManager] = None
 
 
 def smart_tokenize(text: str) -> List[str]:
@@ -378,7 +388,10 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
     """
     Intelligent memory query interface with natural language support.
 
-    This is the main entry point for Phase 1 Agent Experience First redesign.
+    Phase 2 enhancements:
+    - Conversation context management
+    - Follow-up query support
+    - Reference resolution (指代词解析)
 
     Args:
         query: Natural language query (e.g., "我之前讨论过 Python 异步吗？")
@@ -386,7 +399,10 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
 
     Returns:
         Natural language response with summary, insights, and suggestions
+        Also includes context_id for follow-up queries
     """
+    global _context_manager
+
     try:
         # Wait for DB ready
         await asyncio.wait_for(_db_ready.wait(), timeout=120.0)
@@ -394,7 +410,112 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
         if _db_build_error:
             return format_error_response(_db_build_error, query)
 
-        # Parse intent
+        # Initialize context manager if needed
+        if _context_manager is None:
+            _context_manager = ContextManager(max_contexts=100, ttl_seconds=1800)
+            await _context_manager.start_cleanup_task()
+
+        # Get or create conversation context
+        ctx = await _context_manager.get_or_create(context)
+
+        # Check if this is a follow-up query
+        is_followup = is_followup_query(query)
+
+        # Try to resolve references if follow-up
+        resolved_ref = None
+        if is_followup and ctx.query_history:
+            resolved_ref = resolve_reference(query, ctx)
+
+        # If reference resolved, handle accordingly
+        if resolved_ref:
+            ref_type = resolved_ref.get("type")
+
+            if ref_type in ("rank", "code", "previous"):
+                # Return detailed info about the referenced result
+                result = resolved_ref.get("result")
+
+                response = {
+                    "summary": f"这是{resolved_ref.get('rank', '上一个')}结果的详细信息。",
+                    "insights": [
+                        f"会话 ID: {result.session_id}",
+                        f"时间: {result.timestamp}",
+                        f"角色: {result.role}",
+                        f"相关度: {result.score:.2f}"
+                    ],
+                    "key_findings": [{
+                        "text": result.text,
+                        "session_id": result.session_id,
+                        "item_index": result.item_index,
+                        "source": result.source
+                    }],
+                    "suggestions": [
+                        "需要查看完整上下文吗？",
+                        "导出这次对话？"
+                    ],
+                    "metadata": {
+                        "query": query,
+                        "context_id": ctx.context_id,
+                        "reference_resolved": True,
+                        "reference_type": ref_type
+                    }
+                }
+
+                # Add to context history
+                ctx.add_query(query, [result])
+
+                return response
+
+            elif ref_type == "session":
+                # Search within the focused session
+                session_id = resolved_ref.get("session_id")
+                search_results = await bm25_search_async(query, limit=20, source="both")
+
+                # Filter results to focused session
+                filtered_results = [
+                    r for r in search_results.get("results", [])
+                    if r.get("session_id") == session_id
+                ]
+
+                if filtered_results:
+                    formatted = format_search_results(
+                        query=query,
+                        results=filtered_results,
+                        source="both"
+                    )
+                    formatted["metadata"]["context_id"] = ctx.context_id
+                    formatted["metadata"]["filtered_to_session"] = session_id
+
+                    # Convert to SearchResult objects
+                    search_result_objs = [
+                        SearchResult(
+                            session_id=r.get("session_id", ""),
+                            timestamp=r.get("timestamp", ""),
+                            role=r.get("role", ""),
+                            text=r.get("text", ""),
+                            score=r.get("score", 0.0),
+                            source=r.get("source", ""),
+                            item_index=r.get("item_index"),
+                            event_id=r.get("event_id")
+                        )
+                        for r in filtered_results
+                    ]
+                    ctx.add_query(query, search_result_objs)
+
+                    return formatted
+                else:
+                    return {
+                        "summary": f"在会话 {session_id} 中没有找到相关内容。",
+                        "insights": [],
+                        "key_findings": [],
+                        "suggestions": ["尝试搜索其他会话？"],
+                        "metadata": {
+                            "query": query,
+                            "context_id": ctx.context_id,
+                            "filtered_to_session": session_id
+                        }
+                    }
+
+        # Parse intent (normal query flow)
         parsed = parse_intent(query)
 
         # Route to appropriate handler based on intent
@@ -407,11 +528,32 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
             search_results = await bm25_search_async(search_query, limit=20, source="both")
 
             # Format as natural language
-            return format_search_results(
+            formatted = format_search_results(
                 query=query,
                 results=search_results.get("results", []),
                 source=search_results.get("source", "both")
             )
+
+            # Add context ID to metadata
+            formatted["metadata"]["context_id"] = ctx.context_id
+
+            # Convert to SearchResult objects and add to context
+            search_result_objs = [
+                SearchResult(
+                    session_id=r.get("session_id", ""),
+                    timestamp=r.get("timestamp", ""),
+                    role=r.get("role", ""),
+                    text=r.get("text", ""),
+                    score=r.get("score", 0.0),
+                    source=r.get("source", ""),
+                    item_index=r.get("item_index"),
+                    event_id=r.get("event_id")
+                )
+                for r in search_results.get("results", [])
+            ]
+            ctx.add_query(query, search_result_objs)
+
+            return formatted
 
         elif parsed.intent == QueryIntent.ACTIVITY_SUMMARY:
             # Determine days from time range
@@ -424,7 +566,13 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
             activity_data = await get_recent_activity_async(days=days)
 
             # Format as natural language
-            return format_activity_summary(activity_data)
+            formatted = format_activity_summary(activity_data)
+            formatted["metadata"]["context_id"] = ctx.context_id
+
+            # Add to context (no results for activity summary)
+            ctx.add_query(query, [])
+
+            return formatted
 
         elif parsed.intent == QueryIntent.GET_CONTEXT:
             # Try to extract session_id and item_index from keywords
@@ -433,13 +581,35 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
 
             if search_results.get("results"):
                 # Return first result with more context
-                return format_search_results(
+                formatted = format_search_results(
                     query=query,
                     results=search_results.get("results", []),
                     source=search_results.get("source", "both")
                 )
+                formatted["metadata"]["context_id"] = ctx.context_id
+
+                # Convert and add to context
+                search_result_objs = [
+                    SearchResult(
+                        session_id=r.get("session_id", ""),
+                        timestamp=r.get("timestamp", ""),
+                        role=r.get("role", ""),
+                        text=r.get("text", ""),
+                        score=r.get("score", 0.0),
+                        source=r.get("source", ""),
+                        item_index=r.get("item_index"),
+                        event_id=r.get("event_id")
+                    )
+                    for r in search_results.get("results", [])
+                ]
+                ctx.add_query(query, search_result_objs)
+
+                return formatted
             else:
-                return format_error_response("未找到相关上下文", query)
+                response = format_error_response("未找到相关上下文", query)
+                response["metadata"]["context_id"] = ctx.context_id
+                ctx.add_query(query, [])
+                return response
 
         elif parsed.intent == QueryIntent.FIND_SESSION:
             # Search for sessions with time filter
@@ -447,15 +617,34 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
             search_results = await bm25_search_async(search_query, limit=20, source="both")
 
             # Format with session grouping
-            return format_search_results(
+            formatted = format_search_results(
                 query=query,
                 results=search_results.get("results", []),
                 source=search_results.get("source", "both")
             )
+            formatted["metadata"]["context_id"] = ctx.context_id
+
+            # Convert and add to context
+            search_result_objs = [
+                SearchResult(
+                    session_id=r.get("session_id", ""),
+                    timestamp=r.get("timestamp", ""),
+                    role=r.get("role", ""),
+                    text=r.get("text", ""),
+                    score=r.get("score", 0.0),
+                    source=r.get("source", ""),
+                    item_index=r.get("item_index"),
+                    event_id=r.get("event_id")
+                )
+                for r in search_results.get("results", [])
+            ]
+            ctx.add_query(query, search_result_objs)
+
+            return formatted
 
         elif parsed.intent == QueryIntent.EXPORT:
             # For now, guide user to use session.export tool
-            return {
+            response = {
                 "summary": "导出功能需要指定会话 ID。",
                 "insights": [
                     "请先搜索找到要导出的会话",
@@ -468,9 +657,12 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
                 ],
                 "metadata": {
                     "query": query,
-                    "intent": "export"
+                    "intent": "export",
+                    "context_id": ctx.context_id
                 }
             }
+            ctx.add_query(query, [])
+            return response
 
         elif parsed.intent == QueryIntent.PATTERN_DISCOVERY:
             # Pattern discovery - future implementation
@@ -478,6 +670,8 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
             activity_data = await get_recent_activity_async(days=30)
             response = format_activity_summary(activity_data)
             response["insights"].insert(0, "模式发现功能正在开发中，这里显示最近 30 天的活动摘要")
+            response["metadata"]["context_id"] = ctx.context_id
+            ctx.add_query(query, [])
             return response
 
         else:
@@ -485,13 +679,32 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
             search_results = await bm25_search_async(query, limit=20, source="both")
 
             if search_results.get("results"):
-                return format_search_results(
+                formatted = format_search_results(
                     query=query,
                     results=search_results.get("results", []),
                     source=search_results.get("source", "both")
                 )
+                formatted["metadata"]["context_id"] = ctx.context_id
+
+                # Convert and add to context
+                search_result_objs = [
+                    SearchResult(
+                        session_id=r.get("session_id", ""),
+                        timestamp=r.get("timestamp", ""),
+                        role=r.get("role", ""),
+                        text=r.get("text", ""),
+                        score=r.get("score", 0.0),
+                        source=r.get("source", ""),
+                        item_index=r.get("item_index"),
+                        event_id=r.get("event_id")
+                    )
+                    for r in search_results.get("results", [])
+                ]
+                ctx.add_query(query, search_result_objs)
+
+                return formatted
             else:
-                return {
+                response = {
                     "summary": f"无法理解查询「{query}」。",
                     "insights": [
                         "尝试使用更具体的关键词",
@@ -505,9 +718,12 @@ async def memory_query_async(query: str, context: Optional[str] = None) -> Dict[
                     ],
                     "metadata": {
                         "query": query,
-                        "intent": "unknown"
+                        "intent": "unknown",
+                        "context_id": ctx.context_id
                     }
                 }
+                ctx.add_query(query, [])
+                return response
 
     except asyncio.TimeoutError:
         return format_error_response("数据库初始化超时", query)

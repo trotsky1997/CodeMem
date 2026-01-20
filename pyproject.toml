@@ -1,7 +1,7 @@
 [project]
 name = "codemem-mcp"
-version = "0.3.0"
-description = "CodeMem MCP server with Agent Experience First design"
+version = "0.4.0"
+description = "CodeMem MCP server with conversational context support"
 requires-python = ">=3.10"
 dependencies = [
   "pydantic>=2.0.0",
@@ -19,4 +19,4 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["mcp_server", "models", "unified_history", "export_sessions_md", "test_query", "intent_recognition", "nl_formatter"]
+py-modules = ["mcp_server", "models", "unified_history", "export_sessions_md", "test_query", "intent_recognition", "nl_formatter", "context_manager"]
