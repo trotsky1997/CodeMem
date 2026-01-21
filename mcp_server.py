@@ -138,13 +138,16 @@ def build_bm25_md_index_sync(md_sessions_dir: Path) -> Tuple[Any, List, List]:
                 session_id = md_file.stem
 
                 import re
-                messages = re.split(r'\n### \[(.*?)\] (.*?)\n', content)
+                # Updated pattern to match actual format: ### timestamp | role | type
+                messages = re.split(r'\n### (\d+) \| (\w+) \| (\w+)\n', content)
 
-                for i in range(1, len(messages), 3):
-                    if i + 2 < len(messages):
-                        role = messages[i]
-                        timestamp = messages[i + 1]
-                        text = messages[i + 2].strip()
+                # messages[0] is the header, then groups of 4: timestamp, role, type, text
+                for i in range(1, len(messages), 4):
+                    if i + 3 < len(messages):
+                        timestamp = messages[i]
+                        role = messages[i + 1]
+                        msg_type = messages[i + 2]
+                        text = messages[i + 3].strip()
 
                         if text:
                             tokens = smart_tokenize(text)
@@ -176,7 +179,8 @@ async def build_bm25_index_async():
 
     loop = asyncio.get_event_loop()
 
-    with ProcessPoolExecutor(max_workers=1) as executor:
+    # Use ThreadPoolExecutor instead of ProcessPoolExecutor for Windows compatibility
+    with ThreadPoolExecutor(max_workers=1) as executor:
         # Build markdown index
         md_future = loop.run_in_executor(executor, build_bm25_md_index_sync, MD_SESSIONS_DIR)
         md_result = await md_future
@@ -433,10 +437,7 @@ async def build_db_async(db_path: Path, include_history: bool, extra_roots: List
         await conn.commit()
         await conn.close()
 
-        # Build BM25 indexes in parallel
-        await build_bm25_index_async()
-
-        # Export markdown sessions
+        # Export markdown sessions FIRST (BM25 needs these files)
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor() as executor:
             await loop.run_in_executor(
@@ -446,6 +447,9 @@ async def build_db_async(db_path: Path, include_history: bool, extra_roots: List
                 MD_SESSIONS_DIR,
                 False
             )
+
+        # Build BM25 indexes AFTER markdown export
+        await build_bm25_index_async()
 
         _db_ready.set()
 

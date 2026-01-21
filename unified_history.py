@@ -162,8 +162,8 @@ def extract_claude_items(
                         if ctype == "text":
                             items.append({"type": "text", "text": c.get("text")})
                         elif ctype == "thinking":
-                            # Store thinking text in 'content' field to avoid confusion with 'text'
-                            items.append({"type": "thinking", "content": c.get("thinking")})
+                            # Store thinking text in 'text' field for consistency
+                            items.append({"type": "thinking", "text": c.get("thinking")})
                         elif ctype == "tool_use":
                             items.append({
                                 "type": "tool_use",
@@ -304,8 +304,18 @@ def extract_opencode_items(
                 })
             elif item_type == "image":
                 items.append({"type": "image", "text": item.get("source", {}).get("data", "")})
+            elif item_type == "reasoning":
+                # OpenCode reasoning blocks have text
+                items.append({"type": "reasoning", "text": item.get("text", "")})
+            elif item_type in ("step-start", "step-finish"):
+                # Skip step markers, they're metadata
+                continue
             else:
-                items.append({"type": item_type, "text": str(item)})
+                # For other types, try to extract text or convert to string
+                text = item.get("text", "")
+                if not text:
+                    text = str(item)
+                items.append({"type": item_type, "text": text})
 
     return role, items, is_meta
 
@@ -313,13 +323,23 @@ def extract_opencode_items(
 def extract_cursor_items(
     record: Dict[str, Any],
 ) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[bool]]:
-    """Extract items from Cursor chat format."""
-    role = record.get("role")
-    content = record.get("content") or record.get("message")
+    """Extract items from Cursor chat format.
+
+    New format: record has 'message' dict with 'role' and 'content'
+    """
     items: List[Dict[str, Any]] = []
     is_meta = None
 
-    # Cursor format can be string or structured
+    # Extract from message dict
+    message = record.get("message")
+    if isinstance(message, dict):
+        role = message.get("role")
+        content = message.get("content")
+    else:
+        role = None
+        content = None
+
+    # Parse content
     if isinstance(content, str):
         items.append({"type": "text", "text": content})
     elif isinstance(content, list):
@@ -333,7 +353,6 @@ def extract_cursor_items(
             elif isinstance(item, str):
                 items.append({"type": "text", "text": item})
     elif isinstance(content, dict):
-        # Sometimes content is a dict with text field
         text = content.get("text") or content.get("content")
         if text:
             items.append({"type": "text", "text": text})
@@ -382,37 +401,122 @@ def load_agent_messages(agent_id: str, base_dir: Path) -> List[Dict[str, Any]]:
 
 
 def load_cursor_chats(db_path: Path) -> List[Dict[str, Any]]:
-    """Load chat history from Cursor's state.vscdb SQLite database."""
+    """Load chat history from Cursor's state.vscdb SQLite database.
+
+    New Cursor format:
+    - Workspace DB: composer.composerData in ItemTable
+    - Global DB: composerData and bubbleId in cursorDiskKV table
+    """
     records = []
+
     try:
+        # Determine if this is a workspace or global database
+        is_workspace_db = "workspaceStorage" in str(db_path)
+        is_global_db = "globalStorage" in str(db_path)
+
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
-        # Query ItemTable for chat data
-        cursor.execute("""
-            SELECT key, value FROM ItemTable
-            WHERE key IN (
-                'aiService.prompts',
-                'workbench.panel.aichat.view.aichat.chatdata'
-            )
-        """)
+        if is_workspace_db:
+            # Workspace DB: Get composer IDs from composer.composerData
+            cursor.execute("""
+                SELECT value FROM ItemTable
+                WHERE key = 'composer.composerData'
+            """)
 
-        for key, value in cursor.fetchall():
-            if not value:
+            result = cursor.fetchone()
+            if result and result[0]:
+                try:
+                    composer_data = json.loads(result[0])
+                    all_composers = composer_data.get('allComposers', [])
+
+                    # Get global DB path (sibling to workspace storage)
+                    workspace_storage_dir = db_path.parent.parent
+                    global_db_path = workspace_storage_dir.parent / 'globalStorage' / 'state.vscdb'
+
+                    if global_db_path.exists():
+                        # Load conversations from global DB
+                        records.extend(load_cursor_global_conversations(
+                            global_db_path,
+                            [c.get('composerId') for c in all_composers if c.get('composerId')],
+                            str(db_path)
+                        ))
+                except json.JSONDecodeError:
+                    pass
+
+        elif is_global_db:
+            # Global DB: Load all conversations from cursorDiskKV
+            records.extend(load_cursor_global_all_conversations(db_path))
+
+        conn.close()
+
+    except sqlite3.Error:
+        pass
+
+    return records
+
+
+def load_cursor_global_conversations(
+    global_db_path: Path,
+    composer_ids: List[str],
+    source_path: str
+) -> List[Dict[str, Any]]:
+    """Load conversations for specific composer IDs from global database."""
+    records = []
+
+    try:
+        conn = sqlite3.connect(str(global_db_path))
+        cursor = conn.cursor()
+
+        for composer_id in composer_ids:
+            # Get composer metadata
+            cursor.execute("""
+                SELECT value FROM cursorDiskKV
+                WHERE key = ?
+            """, (f"composerData:{composer_id}",))
+
+            result = cursor.fetchone()
+            if not result or not result[0]:
                 continue
+
             try:
-                data = json.loads(value)
-                # Cursor stores chats as array or nested structure
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict):
-                            item["_source"] = str(db_path)
-                            item["_cursor_key"] = key
-                            records.append(item)
-                elif isinstance(data, dict):
-                    data["_source"] = str(db_path)
-                    data["_cursor_key"] = key
-                    records.append(data)
+                composer_data = json.loads(result[0])
+                conversation_headers = composer_data.get('fullConversationHeadersOnly', [])
+                created_at = composer_data.get('createdAt', 0)
+
+                # Load each bubble in the conversation
+                for header in conversation_headers:
+                    bubble_id = header.get('bubbleId')
+                    if not bubble_id:
+                        continue
+
+                    cursor.execute("""
+                        SELECT value FROM cursorDiskKV
+                        WHERE key = ?
+                    """, (f"bubbleId:{composer_id}:{bubble_id}",))
+
+                    bubble_result = cursor.fetchone()
+                    if bubble_result and bubble_result[0]:
+                        try:
+                            bubble_data = json.loads(bubble_result[0])
+
+                            # Convert to unified format
+                            record = {
+                                "sessionId": composer_id[:8],  # Shortened for consistency
+                                "timestamp": str(created_at) if created_at else None,  # Convert to string
+                                "type": "message",
+                                "message": {
+                                    "role": "user" if bubble_data.get('type') == 1 else "assistant",
+                                    "content": bubble_data.get('text', '')
+                                },
+                                "_source": source_path,
+                                "_cursor_composer_id": composer_id,
+                                "_cursor_bubble_id": bubble_id,
+                                "_cursor_type": bubble_data.get('type')
+                            }
+                            records.append(record)
+                        except json.JSONDecodeError:
+                            continue
             except json.JSONDecodeError:
                 continue
 
@@ -421,6 +525,76 @@ def load_cursor_chats(db_path: Path) -> List[Dict[str, Any]]:
         pass
 
     return records
+
+
+def load_cursor_global_all_conversations(db_path: Path) -> List[Dict[str, Any]]:
+    """Load all conversations from global database (when scanning global DB directly)."""
+    records = []
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        # Get all composer IDs
+        cursor.execute("""
+            SELECT key FROM cursorDiskKV
+            WHERE key LIKE 'composerData:%'
+        """)
+
+        composer_ids = [row[0].split(':', 1)[1] for row in cursor.fetchall()]
+        conn.close()
+
+        # Load conversations for all composers
+        records.extend(load_cursor_global_conversations(
+            db_path,
+            composer_ids,
+            str(db_path)
+        ))
+
+    except sqlite3.Error:
+        pass
+
+    return records
+
+
+def load_opencode_message_with_parts(msg_path: Path) -> Dict[str, Any]:
+    """Load OpenCode message and merge with its parts.
+
+    OpenCode stores messages in two places:
+    - Message metadata: storage/message/<session-id>/msg_*.json
+    - Message content: storage/part/msg_<message-id>/prt_*.json
+    """
+    # Load message metadata
+    with msg_path.open("r", encoding="utf-8") as f:
+        message = json.load(f)
+
+    message["_source"] = str(msg_path)
+
+    # Find storage root (go up to storage directory)
+    storage_dir = msg_path.parent.parent.parent  # message/<session>/<file> -> storage
+    part_dir = storage_dir / "part" / msg_path.stem  # msg_<id>
+
+    # Load parts if they exist
+    content_parts = []
+    if part_dir.exists():
+        part_files = sorted(part_dir.glob("prt_*.json"))
+        for part_file in part_files:
+            try:
+                with part_file.open("r", encoding="utf-8") as f:
+                    part = json.load(f)
+                    content_parts.append(part)
+            except (json.JSONDecodeError, IOError):
+                continue
+
+    # Add content to message
+    if content_parts:
+        message["content"] = content_parts
+
+    # Extract timestamp from time.created
+    if "time" in message and "created" in message["time"]:
+        message["timestamp"] = message["time"]["created"]
+
+    return message
 
 
 def collect_files(roots: List[Path]) -> List[Path]:
@@ -441,11 +615,17 @@ def collect_files(roots: List[Path]) -> List[Path]:
                     p for p in root.rglob("msg_*.json")
                 )
             # Collect Cursor SQLite databases
-            # Cursor stores chats in state.vscdb in workspaceStorage/<hash>/
+            # Cursor stores chats in state.vscdb in workspaceStorage/<hash>/ and globalStorage/
             if "cursor" in str(root).lower():
+                # Collect workspace databases
                 files.extend(
                     p for p in root.rglob("state.vscdb")
+                    if "workspaceStorage" in str(p)
                 )
+                # Also collect global database if it exists
+                global_db = root / "User" / "globalStorage" / "state.vscdb"
+                if global_db.exists():
+                    files.append(global_db)
     return sorted(set(files))
 
 
@@ -457,6 +637,9 @@ def load_records(files: List[Path]) -> List[Dict[str, Any]]:
         # Handle Cursor SQLite databases separately
         if p.name == "state.vscdb":
             return load_cursor_chats(p)
+        # Handle OpenCode messages (need to load with parts)
+        if p.name.startswith("msg_") and "opencode" in str(p).lower():
+            return [load_opencode_message_with_parts(p)]
         return list(iter_jsonl(p))
 
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -497,13 +680,17 @@ def load_records(files: List[Path]) -> List[Dict[str, Any]]:
     seen: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     deduped: List[Dict[str, Any]] = []
     for r in records:
+        # Get content for deduplication
+        # OpenCode has content at top level, others have it in message
         msg = r.get("message") or {}
-        items = normalize_content(msg.get("content"))
+        content = msg.get("content") or r.get("content")
+        items = normalize_content(content)
+
         key = (
             r.get("type"),
             r.get("timestamp"),
             r.get("isMeta"),
-            r.get("sessionId"),
+            r.get("sessionId") or r.get("sessionID"),  # OpenCode uses sessionID
             content_key(items),
         )
         prev = seen.get(key)
@@ -511,7 +698,9 @@ def load_records(files: List[Path]) -> List[Dict[str, Any]]:
             seen[key] = r
             deduped.append(r)
         else:
-            prev_items = normalize_content((prev.get("message") or {}).get("content"))
+            prev_msg = prev.get("message") or {}
+            prev_content = prev_msg.get("content") or prev.get("content")
+            prev_items = normalize_content(prev_content)
             if len(items) > len(prev_items):
                 seen[key] = r
                 deduped[-1] = r
@@ -553,17 +742,15 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     if msg_idx + 1 < len(parts):
                         session_id = shorten_uuid(parts[msg_idx + 1])
             message_id = shorten_uuid(r.get("id"))
+            # Convert timestamp to string for OpenCode
+            timestamp = r.get("timestamp")
+            if timestamp and isinstance(timestamp, (int, float)):
+                timestamp = str(timestamp)
         elif platform == "cursor":
             role, items, is_meta = extract_cursor_items(r)
-            # Cursor: extract session_id from workspace hash in file path
-            session_id = None
-            if source_file:
-                parts = Path(source_file).parts
-                if "workspaceStorage" in parts:
-                    ws_idx = parts.index("workspaceStorage")
-                    if ws_idx + 1 < len(parts):
-                        session_id = parts[ws_idx + 1][:8]  # Use first 8 chars of workspace hash
-            message_id = shorten_uuid(r.get("id") or r.get("messageId"))
+            # Use sessionId from record (new format)
+            session_id = r.get("sessionId")
+            message_id = shorten_uuid(r.get("_cursor_bubble_id") or r.get("id") or r.get("messageId"))
         else:
             msg = r.get("message") or {}
             items = normalize_content(msg.get("content"))
@@ -581,6 +768,11 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not items:
             items = [{"type": "unknown"}]
 
+        # Ensure timestamp is string for all platforms
+        timestamp = r.get("timestamp")
+        if timestamp and isinstance(timestamp, (int, float)):
+            timestamp = str(timestamp)
+
         if session_id and role == "user":
             turn_counters[session_id] = turn_counters.get(session_id, 0) + 1
             current_turn[session_id] = f"{session_id}:{turn_counters[session_id]}"
@@ -594,10 +786,10 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if item_type == "tool_result":
                 summary = summarize_tool_result(it.get("content"))
             text = it.get("text")
-            index_text = text if item_type == "text" else summary
+            index_text = text if item_type in ("text", "thinking") else summary
 
-            # Split text into lines if it's a text item
-            if text and item_type == "text" and "\n" in text:
+            # Split text into lines if it's a text or thinking item
+            if text and item_type in ("text", "thinking") and "\n" in text:
                 lines = text.split("\n")
                 for line_no, line in enumerate(lines):
                     # Create a row for each line
@@ -609,13 +801,13 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             turn_id=turn_id,
                             item_index=idx,
                             line_number=line_no,
-                            timestamp=r.get("timestamp"),
+                            timestamp=timestamp,
                             role=role,
                             is_meta=is_meta,
                             agent_id=r.get("agentId"),
                             is_indexable=(
                                 role in ("user", "assistant")
-                                and item_type in ("text", "tool_result")
+                                and item_type in ("text", "tool_result", "thinking")
                                 and line.strip()  # Only index non-empty lines
                             ),
                             item_type=item_type,
@@ -642,13 +834,13 @@ def to_df(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         turn_id=turn_id,
                         item_index=idx,
                         line_number=0,  # Single line items have line_number=0
-                        timestamp=r.get("timestamp"),
+                        timestamp=timestamp,
                         role=role,
                         is_meta=is_meta,
                         agent_id=r.get("agentId"),
                         is_indexable=(
                             role in ("user", "assistant")
-                            and item_type in ("text", "tool_result")
+                            and item_type in ("text", "tool_result", "thinking")
                         ),
                         item_type=item_type,
                         text=text,
@@ -680,19 +872,19 @@ def main() -> int:
     if sys.platform == "win32":
         # Windows paths
         cursor_path = home / "AppData" / "Roaming" / "Cursor" / "User"
-        opencode_path = home / "AppData" / "Local" / "opencode" / "project"
+        opencode_path = home / ".local" / "share" / "opencode" / "storage" / "message"
         claude_base = home / "AppData" / "Roaming" / ".claude"
         codex_base = home / "AppData" / "Roaming" / ".codex"
     elif sys.platform == "darwin":
         # macOS paths
         cursor_path = home / "Library" / "Application Support" / "Cursor" / "User"
-        opencode_path = home / "Library" / "Application Support" / "opencode" / "project"
+        opencode_path = home / ".local" / "share" / "opencode" / "storage" / "message"
         claude_base = home / ".claude"
         codex_base = home / ".codex"
     else:
         # Linux paths
         cursor_path = home / ".config" / "Cursor" / "User"
-        opencode_path = home / ".local" / "share" / "opencode" / "project"
+        opencode_path = home / ".local" / "share" / "opencode" / "storage" / "message"
         claude_base = home / ".claude"
         codex_base = home / ".codex"
 
