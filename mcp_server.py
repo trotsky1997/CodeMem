@@ -190,10 +190,16 @@ async def build_bm25_index_async():
             _bm25_md_index, _bm25_md_docs, _bm25_md_metadata = md_result
 
 
-async def bm25_search_async(query: str, limit: int = 20) -> Dict[str, Any]:
-    """Async BM25 search (markdown only)."""
+async def bm25_search_async(query: str, limit: int = 20, mode: str = "refs") -> Dict[str, Any]:
+    """Async BM25 search (markdown only).
+
+    Args:
+        query: Search query
+        limit: Max results to return
+        mode: Return mode - "refs" (references only), "preview" (with preview), "full" (complete text)
+    """
     # Check cache
-    key = cache_key("bm25", query, limit=limit)
+    key = cache_key("bm25", query, limit=limit, mode=mode)
     cached = await get_from_cache(key)
     if cached is not None:
         return cached
@@ -239,21 +245,70 @@ async def bm25_search_async(query: str, limit: int = 20) -> Dict[str, Any]:
             for idx in md_top_indices:
                 if md_scores[idx] > 0:
                     meta = _bm25_md_metadata[idx]
-                    results.append({
-                        "timestamp": meta["timestamp"],
-                        "role": meta["role"],
-                        "text": meta["text"],
-                        "session_id": meta["session_id"],
-                        "file": meta["file"],
-                        "score": float(md_scores[idx]),
-                        "source": "markdown"
-                    })
 
-    result = {
-        "query": query,
-        "count": len(results),
-        "results": results
-    }
+                    # Build result based on mode
+                    if mode == "refs":
+                        # Minimal reference mode - only IDs and metadata
+                        result_item = {
+                            "ref_id": f"{meta['session_id']}:{meta['timestamp']}",
+                            "session_id": meta["session_id"],
+                            "timestamp": meta["timestamp"],
+                            "role": meta["role"],
+                            "score": float(md_scores[idx]),
+                            "file": f"~/.codemem/md_sessions/{meta['file']}",
+                            "source": "markdown"
+                        }
+                    elif mode == "preview":
+                        # Preview mode - include first 100 chars
+                        text = meta["text"]
+                        preview = text[:100] + "..." if len(text) > 100 else text
+                        result_item = {
+                            "ref_id": f"{meta['session_id']}:{meta['timestamp']}",
+                            "session_id": meta["session_id"],
+                            "timestamp": meta["timestamp"],
+                            "role": meta["role"],
+                            "preview": preview,
+                            "score": float(md_scores[idx]),
+                            "file": f"~/.codemem/md_sessions/{meta['file']}",
+                            "source": "markdown"
+                        }
+                    else:  # mode == "full"
+                        # Full mode - include complete text
+                        result_item = {
+                            "ref_id": f"{meta['session_id']}:{meta['timestamp']}",
+                            "session_id": meta["session_id"],
+                            "timestamp": meta["timestamp"],
+                            "role": meta["role"],
+                            "text": meta["text"],
+                            "score": float(md_scores[idx]),
+                            "file": f"~/.codemem/md_sessions/{meta['file']}",
+                            "source": "markdown"
+                        }
+
+                    results.append(result_item)
+
+    # Format result based on mode
+    if mode == "summary":
+        # Summary mode - return stats and sample
+        result = {
+            "query": query,
+            "mode": "summary",
+            "total_results": len(results),
+            "sample_results": results[:3],  # First 3 results as sample
+            "hint": "使用 mode='refs' 获取所有引用，或 mode='full' 获取完整内容"
+        }
+    else:
+        # Other modes - return all results
+        result = {
+            "query": query,
+            "mode": mode,
+            "count": len(results),
+            "results": results
+        }
+
+        # Add hint for refs mode
+        if mode == "refs" and results:
+            result["hint"] = "使用 get_message 工具获取完整消息内容，或使用 Read 工具读取文件"
 
     # Cache result
     await put_to_cache(key, result)
@@ -581,14 +636,26 @@ async def main_async():
                     "搜索来源：Markdown 导出文件（按行匹配）。\n\n"
                     "参数：\n"
                     "- query: 搜索查询\n"
-                    "- top_k: 返回结果数量（默认 20）\n\n"
-                    "返回：匹配的对话记录，按相关性排序。"
+                    "- top_k: 返回结果数量（默认 20）\n"
+                    "- mode: 返回模式（默认 refs）\n"
+                    "  * summary: 返回统计信息和前3条样本（最节省上下文）\n"
+                    "  * refs: 只返回引用ID和元数据（推荐，节省上下文）\n"
+                    "  * preview: 返回前100字预览\n"
+                    "  * full: 返回完整内容（慎用，占用大量上下文）\n\n"
+                    "返回：匹配的对话记录，按相关性排序。\n"
+                    "提示：使用 refs 模式后，可用 get_message 获取完整内容。"
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "搜索查询"},
-                        "top_k": {"type": "integer", "description": "返回结果数量", "default": 20}
+                        "top_k": {"type": "integer", "description": "返回结果数量", "default": 20},
+                        "mode": {
+                            "type": "string",
+                            "enum": ["summary", "refs", "preview", "full"],
+                            "default": "refs",
+                            "description": "返回模式：summary=统计+样本, refs=引用, preview=预览, full=完整内容"
+                        }
                     },
                     "required": ["query"]
                 }
@@ -605,6 +672,12 @@ async def main_async():
                     "- SELECT * FROM events WHERE text LIKE '%keyword%' LIMIT 10\n"
                     "- SELECT COUNT(*) FROM events WHERE role='user'\n"
                     "- SELECT session_id, COUNT(*) FROM events GROUP BY session_id\n\n"
+                    "参数：\n"
+                    "- query: SQL SELECT 查询语句\n"
+                    "- limit: 结果数量限制（默认 100）\n"
+                    "- mode: 返回模式（默认 summary）\n"
+                    "  * summary: 返回统计信息和前3行示例（推荐）\n"
+                    "  * full: 返回所有行（慎用）\n\n"
                     "⚠️ 只支持 SELECT 查询（只读）。"
                 ),
                 inputSchema={
@@ -618,6 +691,12 @@ async def main_async():
                             "type": "integer",
                             "description": "结果数量限制",
                             "default": 100
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["summary", "full"],
+                            "default": "summary",
+                            "description": "返回模式：summary=摘要, full=完整结果"
                         }
                     },
                     "required": ["query"]
@@ -635,6 +714,11 @@ async def main_async():
                     "- async def \\w+\\(.*\\): 查找异步函数定义\n"
                     "- \\d{3}-\\d{4}: 查找电话号码格式\n"
                     "- https?://\\S+: 查找 URL\n\n"
+                    "参数：\n"
+                    "- mode: 返回模式（默认 summary）\n"
+                    "  * summary: 返回统计信息和前3条匹配（推荐）\n"
+                    "  * refs: 返回引用ID和预览\n"
+                    "  * full: 返回完整匹配内容（慎用）\n\n"
                     "支持 Python re 模块的正则语法。"
                 ),
                 inputSchema={
@@ -653,9 +737,66 @@ async def main_async():
                             "type": "integer",
                             "description": "结果数量限制",
                             "default": 50
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["summary", "refs", "full"],
+                            "default": "summary",
+                            "description": "返回模式：summary=摘要, refs=引用, full=完整内容"
                         }
                     },
                     "required": ["pattern"]
+                }
+            ),
+            Tool(
+                name="get_message",
+                description=(
+                    "获取完整消息 - 通过引用ID获取完整消息内容。\n\n"
+                    "适用场景：\n"
+                    "- 在使用 refs 模式搜索后获取完整内容\n"
+                    "- 查看特定消息的详细信息\n\n"
+                    "参数：\n"
+                    "- ref_id: 引用ID，格式为 'session_id:timestamp'\n"
+                    "  例如：'20250122_143022:1737529822.123'\n\n"
+                    "返回：完整的消息内容，包括时间戳、角色、文本等。"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "ref_id": {
+                            "type": "string",
+                            "description": "引用ID (格式: session_id:timestamp)"
+                        }
+                    },
+                    "required": ["ref_id"]
+                }
+            ),
+            Tool(
+                name="list_sessions",
+                description=(
+                    "列出会话 - 列出所有对话会话的元数据。\n\n"
+                    "适用场景：\n"
+                    "- 浏览所有历史会话\n"
+                    "- 查找特定时间段的会话\n"
+                    "- 了解会话的基本信息（消息数量、时间范围等）\n\n"
+                    "参数：\n"
+                    "- limit: 返回会话数量限制（默认 50）\n"
+                    "- platform: 过滤平台（可选，如 'claude.ai', 'api'）\n\n"
+                    "返回：会话列表，包含会话ID、平台、消息数量、时间范围等。"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回会话数量限制",
+                            "default": 50
+                        },
+                        "platform": {
+                            "type": "string",
+                            "description": "过滤平台（可选）"
+                        }
+                    }
                 }
             ),
         ]
@@ -667,13 +808,15 @@ async def main_async():
             if name == "semantic.search":
                 query = arguments.get("query", "")
                 top_k = arguments.get("top_k", 20)
+                mode = arguments.get("mode", "refs")
 
-                result = await bm25_search_async(query, limit=top_k)
+                result = await bm25_search_async(query, limit=top_k, mode=mode)
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
             elif name == "sql.query":
                 query = arguments.get("query", "")
                 limit = arguments.get("limit", 100)
+                mode = arguments.get("mode", "summary")
 
                 # Security: only allow SELECT queries
                 if not query.strip().upper().startswith("SELECT"):
@@ -688,11 +831,26 @@ async def main_async():
 
                 # Format as JSON
                 columns = [desc[0] for desc in cursor.description] if cursor.description else []
-                result = {
-                    "columns": columns,
-                    "rows": [dict(zip(columns, row)) for row in rows],
-                    "count": len(rows)
-                }
+
+                if mode == "summary":
+                    # Summary mode - return stats and sample
+                    result = {
+                        "query": query,
+                        "mode": "summary",
+                        "total_rows": len(rows),
+                        "columns": columns,
+                        "sample_rows": [dict(zip(columns, row)) for row in rows[:3]],
+                        "hint": "使用 mode='full' 获取所有行，或调整 LIMIT 子句"
+                    }
+                else:  # mode == "full"
+                    # Full mode - return all rows
+                    result = {
+                        "query": query,
+                        "mode": "full",
+                        "columns": columns,
+                        "rows": [dict(zip(columns, row)) for row in rows],
+                        "count": len(rows)
+                    }
 
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
@@ -700,6 +858,7 @@ async def main_async():
                 pattern = arguments.get("pattern", "")
                 flags_str = arguments.get("flags", "")
                 limit = arguments.get("limit", 50)
+                mode = arguments.get("mode", "summary")
 
                 # Parse flags
                 import re
@@ -728,23 +887,165 @@ async def main_async():
 
                 for row in rows:
                     text = row[2]
-                    if regex.search(text):
-                        matches.append({
-                            "timestamp": row[0],
-                            "role": row[1],
-                            "text": text,
-                            "session_id": row[3],
-                            "platform": row[4]
-                        })
+                    match_obj = regex.search(text)
+                    if match_obj:
+                        timestamp = row[0]
+                        role = row[1]
+                        session_id = row[3]
+                        platform = row[4]
+
+                        if mode == "summary":
+                            # Summary mode - just count, show samples later
+                            matches.append({
+                                "timestamp": timestamp,
+                                "role": role,
+                                "text": text,
+                                "session_id": session_id,
+                                "platform": platform
+                            })
+                        elif mode == "refs":
+                            # Refs mode - reference ID and preview
+                            preview = text[:100] + "..." if len(text) > 100 else text
+                            matches.append({
+                                "ref_id": f"{session_id}:{timestamp}",
+                                "timestamp": timestamp,
+                                "role": role,
+                                "preview": preview,
+                                "session_id": session_id,
+                                "platform": platform
+                            })
+                        else:  # mode == "full"
+                            # Full mode - complete text
+                            matches.append({
+                                "timestamp": timestamp,
+                                "role": role,
+                                "text": text,
+                                "session_id": session_id,
+                                "platform": platform
+                            })
 
                         if len(matches) >= limit:
                             break
 
+                # Format result based on mode
+                if mode == "summary":
+                    result = {
+                        "pattern": pattern,
+                        "mode": "summary",
+                        "total_matches": len(matches),
+                        "sample_matches": matches[:3],
+                        "hint": "使用 mode='refs' 或 mode='full' 获取更多详情"
+                    }
+                elif mode == "refs":
+                    result = {
+                        "pattern": pattern,
+                        "mode": "refs",
+                        "count": len(matches),
+                        "matches": matches,
+                        "hint": "使用 get_message 工具获取完整消息内容"
+                    }
+                else:  # mode == "full"
+                    result = {
+                        "pattern": pattern,
+                        "mode": "full",
+                        "count": len(matches),
+                        "matches": matches
+                    }
+
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            elif name == "get_message":
+                ref_id = arguments.get("ref_id", "")
+
+                # Parse ref_id (format: session_id:timestamp)
+                if ":" not in ref_id:
+                    return [TextContent(type="text", text="Error: Invalid ref_id format. Expected 'session_id:timestamp'")]
+
+                session_id, timestamp = ref_id.split(":", 1)
+
+                # Query database (timestamp is stored as ISO string)
+                conn = await get_db_connection()
+                cursor = await conn.execute("""
+                    SELECT timestamp, role, text, session_id, platform
+                    FROM events
+                    WHERE session_id = ? AND timestamp = ?
+                    LIMIT 1
+                """, (session_id, timestamp))
+
+                row = await cursor.fetchone()
+
+                if not row:
+                    return [TextContent(type="text", text=f"Error: Message not found for ref_id: {ref_id}")]
+
                 result = {
-                    "pattern": pattern,
-                    "count": len(matches),
-                    "matches": matches
+                    "ref_id": ref_id,
+                    "timestamp": row[0],
+                    "role": row[1],
+                    "text": row[2],
+                    "session_id": row[3],
+                    "platform": row[4]
                 }
+
+                return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+            elif name == "list_sessions":
+                limit = arguments.get("limit", 50)
+                platform = arguments.get("platform")
+
+                # Query database for session metadata
+                conn = await get_db_connection()
+
+                # Build query based on platform filter
+                if platform:
+                    query = """
+                        SELECT
+                            session_id,
+                            platform,
+                            COUNT(*) as message_count,
+                            MIN(timestamp) as first_message,
+                            MAX(timestamp) as last_message
+                        FROM events
+                        WHERE platform = ?
+                        GROUP BY session_id
+                        ORDER BY last_message DESC
+                        LIMIT ?
+                    """
+                    cursor = await conn.execute(query, (platform, limit))
+                else:
+                    query = """
+                        SELECT
+                            session_id,
+                            platform,
+                            COUNT(*) as message_count,
+                            MIN(timestamp) as first_message,
+                            MAX(timestamp) as last_message
+                        FROM events
+                        GROUP BY session_id
+                        ORDER BY last_message DESC
+                        LIMIT ?
+                    """
+                    cursor = await conn.execute(query, (limit,))
+
+                rows = await cursor.fetchall()
+
+                # Format sessions
+                sessions = []
+                for row in rows:
+                    sessions.append({
+                        "session_id": row[0],
+                        "platform": row[1],
+                        "message_count": row[2],
+                        "first_message": row[3],
+                        "last_message": row[4]
+                    })
+
+                result = {
+                    "total_sessions": len(sessions),
+                    "sessions": sessions
+                }
+
+                if platform:
+                    result["filtered_by_platform"] = platform
 
                 return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
